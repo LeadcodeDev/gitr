@@ -9,6 +9,8 @@ repository.workspace = true
 [dependencies]
 domain.workspace = true
 gix.workspace = true
+notify.workspace = true
+notify-debouncer-full.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
