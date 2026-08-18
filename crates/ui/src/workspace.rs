@@ -516,8 +516,11 @@ fn theme_preference_menu_item(
     PopupMenuItem::new(option.label())
         .icon(option.icon())
         .checked(option == current)
-        .on_click(move |_, _window, cx| {
-            let _ = workspace.update_in(cx, move |workspace, window, cx| {
+        .on_click(move |_, window, cx| {
+            let Some(workspace) = workspace.upgrade() else {
+                return;
+            };
+            workspace.update(cx, |workspace, cx| {
                 workspace.set_theme_preference(option, window, cx);
             });
         })
