@@ -1,7 +1,7 @@
 //! Renders the commit metadata header (subject, identifier, parents and author) and,
-//! separately, the commit message body — split because [`render_header`] stays pinned
+//! separately, the commit message body — split because the header renders first
 //! above the detail panel's scroll region while [`render_description`] scrolls
-//! independently, capped to [`density::DETAIL_DESCRIPTION_MAX_HEIGHT`] so an unusually
+//! together with the header inside the tab's own scroll region, so an unusually
 //! long body cannot squeeze the diff editor beneath it out of the panel. See
 //! `detail::ready_state` for where the two are recombined.
 //!
@@ -10,13 +10,8 @@
 //! this panel — selectable.
 
 use domain::{Commit, Parents};
-use gpui::{
-    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
-};
-use gpui_component::{ActiveTheme as _, scroll::ScrollableElement as _, text};
-
-use crate::density;
+use gpui::{AnyElement, App, IntoElement, ParentElement as _, SharedString, Styled as _, div, px};
+use gpui_component::{ActiveTheme as _, text};
 
 use super::format::{abbreviate, escape_markdown, format_timestamp};
 
@@ -49,11 +44,7 @@ pub(super) fn render_header(commit: &Commit, cx: &App) -> impl IntoElement {
 /// Unlike [`selectable`], the body is not escaped: it is prose the committer wrote, and
 /// [`gpui_component::text::markdown`] rendering it as Markdown (lists, emphasis, code
 /// spans) is the point, not a hazard to guard against.
-pub(super) fn render_description(
-    commit: &Commit,
-    scroll_handle: &ScrollHandle,
-    cx: &App,
-) -> Option<AnyElement> {
+pub(super) fn render_description(commit: &Commit, cx: &App) -> Option<AnyElement> {
     let body = commit.body.trim();
     if body.is_empty() {
         return None;
@@ -61,22 +52,12 @@ pub(super) fn render_description(
 
     Some(
         div()
-            .relative()
             .flex_shrink_0()
-            .max_h(density::DETAIL_DESCRIPTION_MAX_HEIGHT)
-            .child(
-                div()
-                    .id("detail-description-scroll")
-                    .max_h(density::DETAIL_DESCRIPTION_MAX_HEIGHT)
-                    .overflow_y_scroll()
-                    .track_scroll(scroll_handle)
-                    .px_3()
-                    .py_3()
-                    .text_sm()
-                    .text_color(cx.theme().foreground)
-                    .child(text::markdown(body.to_string()).selectable(true)),
-            )
-            .vertical_scrollbar(scroll_handle)
+            .px_3()
+            .py_3()
+            .text_sm()
+            .text_color(cx.theme().foreground)
+            .child(text::markdown(body.to_string()).selectable(true))
             .into_any_element(),
     )
 }

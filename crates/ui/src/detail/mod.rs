@@ -27,13 +27,15 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, Window, div,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _,
     alert::Alert,
     dock::{Panel, PanelEvent},
     input::{EditorState, TextDecorationCollection},
+    scroll::ScrollableElement as _,
     spinner::Spinner,
     tab::{Tab, TabBar},
 };
@@ -73,7 +75,7 @@ pub struct DetailPanel {
     diff_editor: Entity<EditorState>,
     diff_decorations: TextDecorationCollection,
     selected_tab: DetailTab,
-    description_scroll_handle: ScrollHandle,
+    general_scroll_handle: ScrollHandle,
     focus_handle: FocusHandle,
 }
 
@@ -89,7 +91,7 @@ impl DetailPanel {
             diff_editor,
             diff_decorations,
             selected_tab: DetailTab::default(),
-            description_scroll_handle: ScrollHandle::new(),
+            general_scroll_handle: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
         }
     }
@@ -152,7 +154,7 @@ impl Render for DetailPanel {
                     detail,
                     selected_tab,
                     &self.diff_editor,
-                    &self.description_scroll_handle,
+                    &self.general_scroll_handle,
                     cx,
                 ),
             })
@@ -226,40 +228,37 @@ fn ready_state(
     detail: &CommitDetail,
     selected_tab: DetailTab,
     diff_editor: &Entity<EditorState>,
-    description_scroll_handle: &ScrollHandle,
+    scroll_handle: &ScrollHandle,
     cx: &App,
 ) -> AnyElement {
     match selected_tab {
-        DetailTab::General => general_tab(detail, description_scroll_handle, cx),
+        DetailTab::General => general_tab(detail, scroll_handle, cx),
         DetailTab::Diff => diff_tab(detail, diff_editor, cx),
     }
 }
 
-fn general_tab(
-    detail: &CommitDetail,
-    description_scroll_handle: &ScrollHandle,
-    cx: &App,
-) -> AnyElement {
+/// The whole tab scrolls as one region, header included, rather than pinning the header
+/// and giving the body a short scroller of its own. A bounded inner scroller inside an
+/// already-tall panel wastes the height it was given and cuts a long message mid-sentence
+/// while empty space sits below it.
+fn general_tab(detail: &CommitDetail, scroll_handle: &ScrollHandle, cx: &App) -> AnyElement {
     div()
+        .relative()
         .flex_1()
         .min_h_0()
         .min_w_0()
-        .flex()
-        .flex_col()
-        .child(metadata::render_header(&detail.commit, cx))
         .child(
             div()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
+                .id("detail-general-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(scroll_handle)
                 .flex()
                 .flex_col()
-                .children(metadata::render_description(
-                    &detail.commit,
-                    description_scroll_handle,
-                    cx,
-                )),
+                .child(metadata::render_header(&detail.commit, cx))
+                .children(metadata::render_description(&detail.commit, cx)),
         )
+        .vertical_scrollbar(scroll_handle)
         .into_any_element()
 }
 
