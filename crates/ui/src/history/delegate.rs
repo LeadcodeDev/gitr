@@ -210,7 +210,13 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
             let row_geometry =
                 geometry::row_geometry(&row, bounds.size.height, geometry::LANE_SPACING);
 
-            for segment in &row_geometry.segments {
+            let strokes = row_geometry
+                .incoming
+                .iter()
+                .chain(row_geometry.crossings.iter())
+                .chain(row_geometry.outgoing.iter());
+
+            for segment in strokes {
                 let top = point(
                     bounds.origin.x + segment.top.x,
                     bounds.origin.y + segment.top.y,
@@ -333,6 +339,7 @@ mod tests {
             lane: Lane(lane),
             color: LaneColor(color),
             segments,
+            has_incoming: false,
         }
     }
 

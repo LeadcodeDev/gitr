@@ -254,3 +254,55 @@ fn width_reflects_the_peak_lane_count_not_the_final_row() {
     assert_eq!(result.width, 2);
     assert_ne!(result.width as usize, result.rows.len());
 }
+
+#[test]
+fn a_tip_has_nothing_incoming_while_everything_it_reaches_does() {
+    let commits = vec![
+        commit("c", Parents::Linear(oid("b"))),
+        commit("b", Parents::Linear(oid("a"))),
+        commit("a", Parents::Root),
+    ];
+
+    let layout = layout(&commits);
+
+    assert!(
+        !layout.rows[0].has_incoming,
+        "the newest commit has no child above it"
+    );
+    assert!(layout.rows[1].has_incoming);
+    assert!(layout.rows[2].has_incoming);
+}
+
+#[test]
+fn each_branch_tip_starts_its_own_track_with_nothing_above_it() {
+    let commits = vec![
+        commit("t1", Parents::Linear(oid("root"))),
+        commit("t2", Parents::Linear(oid("root"))),
+        commit("root", Parents::Root),
+    ];
+
+    let layout = layout(&commits);
+
+    assert!(!layout.rows[0].has_incoming);
+    assert!(
+        !layout.rows[1].has_incoming,
+        "a second tip opens a fresh lane, so nothing reaches it from above either"
+    );
+    assert!(
+        layout.rows[2].has_incoming,
+        "both tips point at the root, so a line does reach it"
+    );
+}
+
+#[test]
+fn a_root_commit_emits_no_segment_of_its_own() {
+    let commits = vec![commit("only", Parents::Root)];
+
+    let layout = layout(&commits);
+
+    assert!(
+        layout.rows[0].segments.is_empty(),
+        "nothing continues below a root, so its band draws nothing downward"
+    );
+    assert!(!layout.rows[0].has_incoming);
+}
