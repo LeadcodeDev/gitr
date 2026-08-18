@@ -5,5 +5,7 @@
 //! state that owns the reads pushes new ones as they arrive.
 
 pub mod model;
+pub mod state;
 
 pub use model::{CommitDetail, History, HistoryFilter, LoadState, ReferenceIndex, RepositoryEvent};
+pub use state::RepositoryState;
