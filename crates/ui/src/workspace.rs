@@ -3,11 +3,11 @@
 //! ```text
 //! ┌─ TitleBar : gitr — <repo> · <branch> ──────────────────────────────┐
 //! ├───────────────┬────────────────────────────────────────────────────┤
-//! │ [repo ▾]      │ centre dock (workstream E fills this)              │
+//! │ [repo ▾]      │ centre dock: HistoryPanel                          │
 //! │ ▸ Working     │                                                    │
 //! │ ▾ Branches    │                                                    │
 //! │ ▸ Remotes     ├──────────────── bottom dock ───────────────────────┤
-//! │ ▸ Tags        │ (workstream F fills this)                          │
+//! │ ▸ Tags        │ DetailPanel                                        │
 //! │ ▸ Stashes     │                                                    │
 //! ├───────────────┴────────────────────────────────────────────────────┤
 //! │ StatusBar : N commits · theme toggle                                │
@@ -17,36 +17,45 @@
 //! The sidebar is plain window chrome, laid out beside [`DockArea`] rather than inside
 //! it as a left dock: it is permanent navigation, not a panel a user drags or closes. The
 //! dock only ever owns the centre and bottom placements here — see
-//! [`install_default_layout`] for exactly where workstream E and F plug in.
+//! [`install_default_layout`] for exactly where the history and detail panels plug in.
+//!
+//! [`Workspace`] owns the single [`RepositoryState`] this window is open on. Every
+//! `RepositoryEvent` it emits is pushed into the panels here; nothing downstream reads a
+//! repository itself.
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use domain::{HeadState, HistoryScope, Reference};
 use gpui::{
     App, AppContext as _, Context, Edges, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
+    ParentElement as _, Render, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IconName, Root, Sizable as _, Theme, ThemeMode, TitleBar,
+    ActiveTheme as _, IconName, Root, Sizable as _, Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    dock::{DockArea, DockAreaState, DockEvent, DockItem},
+    dock::{DockArea, DockAreaState, DockEvent, DockItem, Panel},
     h_flex,
+    notification::NotificationType,
     status_bar::StatusBar,
 };
 
 use crate::{
-    dock_seam::{SeamKind, SeamPanel},
+    detail::DetailPanel,
+    history::{HistoryPanel, HistoryPanelEvent},
     persistence,
-    placeholder::{self, PlaceholderRepository},
+    repository::{History, HistoryFilter, LoadState, RepositoryEvent, RepositoryState},
     sidebar,
 };
 
 const DOCK_AREA_ID: &str = "gitr-dock";
 
 /// Bumping this invalidates a layout persisted against a different default — see
-/// [`install_default_layout`]. Workstreams E and F should bump it the day they replace a
-/// [`SeamPanel`] with a real one, so a user's saved layout does not silently restore a
-/// dock item that no longer matches what gets built by default.
-pub(crate) const DOCK_AREA_VERSION: usize = 1;
+/// [`install_default_layout`]. Bumped from `1` to `2` here because the centre and bottom
+/// docks now hold [`HistoryPanel`] and [`DetailPanel`] instead of the placeholder seam
+/// panels: a layout saved against the old names must not silently restore over them.
+pub(crate) const DOCK_AREA_VERSION: usize = 2;
 
 const BOTTOM_DOCK_HEIGHT: f32 = 240.;
 const SAVE_DEBOUNCE: Duration = Duration::from_secs(10);
@@ -54,18 +63,21 @@ const SAVE_DEBOUNCE: Duration = Duration::from_secs(10);
 /// Root view of a gitr window.
 pub struct Workspace {
     dock_area: Entity<DockArea>,
-    repositories: Vec<PlaceholderRepository>,
-    selected_repository: usize,
+    repository: Entity<RepositoryState>,
+    history_panel: Entity<HistoryPanel>,
+    detail_panel: Entity<DetailPanel>,
     sidebar_collapsed: bool,
     follow_system_theme: bool,
     last_saved_layout: Option<DockAreaState>,
     _save_layout_task: Option<Task<()>>,
     _appearance_subscription: Subscription,
     _dock_subscription: Subscription,
+    _repository_subscription: Subscription,
+    _history_panel_subscription: Subscription,
 }
 
 impl Workspace {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Theme::sync_system_appearance(Some(window), cx);
 
         let entity = cx.entity();
@@ -75,25 +87,43 @@ impl Workspace {
             }
         });
 
+        let repository = cx.new(|cx| RepositoryState::open(path, cx));
+
         let dock_area =
             cx.new(|cx| DockArea::new(DOCK_AREA_ID, Some(DOCK_AREA_VERSION), window, cx));
-        let weak_dock_area = dock_area.downgrade();
 
-        let mut restored = false;
+        let mut restored_panels = None;
         if let Some(state) = persistence::load()
             && state.version == Some(DOCK_AREA_VERSION)
         {
             match dock_area.update(cx, |area, cx| area.load(state, window, cx)) {
-                Ok(()) => restored = true,
+                Ok(()) => {
+                    restored_panels = locate_panel::<HistoryPanel>(&dock_area, cx)
+                        .zip(locate_panel::<DetailPanel>(&dock_area, cx));
+                    if restored_panels.is_none() {
+                        eprintln!(
+                            "gitr: restored dock layout is missing a panel this version installs, using the default"
+                        );
+                    }
+                }
                 Err(error) => {
                     eprintln!("gitr: failed to restore dock layout, using the default: {error:#}")
                 }
             }
         }
 
-        if !restored {
-            install_default_layout(&weak_dock_area, window, cx);
-        }
+        let (history_panel, detail_panel) =
+            restored_panels.unwrap_or_else(|| install_default_layout(&dock_area, window, cx));
+
+        let initial_history = repository.read(cx).history().clone();
+        let initial_detail = repository.read(cx).detail().clone();
+        history_panel.update(cx, |panel, cx| panel.set_history(initial_history, cx));
+        detail_panel.update(cx, |panel, cx| panel.set_detail(initial_detail, cx));
+
+        let repository_subscription =
+            cx.subscribe_in(&repository, window, Self::on_repository_event);
+        let history_panel_subscription =
+            cx.subscribe_in(&history_panel, window, Self::on_history_panel_event);
 
         let dock_subscription = cx.subscribe_in(
             &dock_area,
@@ -117,21 +147,77 @@ impl Workspace {
 
         Self {
             dock_area,
-            repositories: placeholder::placeholder_repositories(),
-            selected_repository: 0,
+            repository,
+            history_panel,
+            detail_panel,
             sidebar_collapsed: false,
             follow_system_theme: true,
             last_saved_layout: None,
             _save_layout_task: None,
             _appearance_subscription: appearance_subscription,
             _dock_subscription: dock_subscription,
+            _repository_subscription: repository_subscription,
+            _history_panel_subscription: history_panel_subscription,
         }
     }
 
-    pub(crate) fn select_repository(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.repositories.len() {
-            self.selected_repository = index;
-            cx.notify();
+    /// Scopes the history to `reference` and pushes it both to [`RepositoryState`], which
+    /// reloads, and directly to [`HistoryPanel`], so its third scope tab appears at once
+    /// instead of waiting on the reload's `RepositoryEvent::HistoryChanged` round trip.
+    pub(crate) fn filter_by_reference(&mut self, reference: Reference, cx: &mut Context<Self>) {
+        let query = self.repository.read(cx).filter().query.clone();
+        let filter = HistoryFilter {
+            scope: HistoryScope::Single(reference),
+            query,
+        };
+        self.history_panel
+            .update(cx, |panel, cx| panel.set_filter(filter.clone(), cx));
+        self.repository
+            .update(cx, |repository, cx| repository.set_filter(filter, cx));
+    }
+
+    fn on_repository_event(
+        &mut self,
+        repository: &Entity<RepositoryState>,
+        event: &RepositoryEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            RepositoryEvent::HistoryChanged => {
+                let history = repository.read(cx).history().clone();
+                self.history_panel
+                    .update(cx, |panel, cx| panel.set_history(history, cx));
+                cx.notify();
+            }
+            RepositoryEvent::SelectionChanged => {
+                let detail = repository.read(cx).detail().clone();
+                self.detail_panel
+                    .update(cx, |panel, cx| panel.set_detail(detail, cx));
+            }
+            RepositoryEvent::Failed(message) => {
+                window.push_notification((NotificationType::Error, message.to_string()), cx);
+            }
+        }
+    }
+
+    fn on_history_panel_event(
+        &mut self,
+        _panel: &Entity<HistoryPanel>,
+        event: &HistoryPanelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            HistoryPanelEvent::Selected(id) => {
+                self.repository
+                    .update(cx, |repository, cx| repository.select(Some(*id), cx));
+            }
+            HistoryPanelEvent::FilterChanged(filter) => {
+                self.repository.update(cx, |repository, cx| {
+                    repository.set_filter(filter.clone(), cx)
+                });
+            }
         }
     }
 
@@ -165,27 +251,24 @@ impl Workspace {
     }
 }
 
-/// Installs the default centre/bottom layout: one [`SeamPanel`] each, standing in for the
-/// real history and detail views.
-///
-/// This is the seam. Workstream E replaces `SeamKind::History` here with its own
-/// `history::HistoryPanel` (any `Entity<P>` where `P: Panel` — see
-/// `gpui_component::dock::Panel`) built with `cx.new(|cx| history::HistoryPanel::new(..))`
-/// and wrapped the same way with `DockItem::tab`, then calls `area.set_center(..)` with
-/// it. Workstream F does the same for `SeamKind::Detail` and `area.set_bottom_dock(..)`.
-/// Both should bump [`DOCK_AREA_VERSION`] when they do.
-fn install_default_layout(dock_area: &WeakEntity<DockArea>, window: &mut Window, cx: &mut App) {
-    let Some(dock_area_entity) = dock_area.upgrade() else {
-        return;
-    };
+/// Builds the default centre/bottom layout — a [`HistoryPanel`] tab in the centre and a
+/// [`DetailPanel`] tab in the bottom dock — and hands both back so [`Workspace`] always
+/// has a handle to push repository state into, whether this ran because no layout was
+/// saved yet or because a saved one turned out not to contain them.
+fn install_default_layout(
+    dock_area: &Entity<DockArea>,
+    window: &mut Window,
+    cx: &mut App,
+) -> (Entity<HistoryPanel>, Entity<DetailPanel>) {
+    let weak_dock_area = dock_area.downgrade();
 
-    let history = cx.new(|cx| SeamPanel::new(SeamKind::History, cx));
-    let detail = cx.new(|cx| SeamPanel::new(SeamKind::Detail, cx));
+    let history_panel = cx.new(|cx| HistoryPanel::new(window, cx));
+    let detail_panel = cx.new(|cx| DetailPanel::new(window, cx));
 
-    let center = DockItem::tab(history, dock_area, window, cx);
-    let bottom = DockItem::tab(detail, dock_area, window, cx);
+    let center = DockItem::tab(history_panel.clone(), &weak_dock_area, window, cx);
+    let bottom = DockItem::tab(detail_panel.clone(), &weak_dock_area, window, cx);
 
-    dock_area_entity.update(cx, |area, cx| {
+    dock_area.update(cx, |area, cx| {
         area.set_version(DOCK_AREA_VERSION, window, cx);
         area.set_center(center, window, cx);
         area.set_bottom_dock(bottom, Some(px(BOTTOM_DOCK_HEIGHT)), true, window, cx);
@@ -198,19 +281,57 @@ fn install_default_layout(dock_area: &WeakEntity<DockArea>, window: &mut Window,
             cx,
         );
     });
+
+    (history_panel, detail_panel)
+}
+
+/// Finds the first `T` panel anywhere in `dock_area`'s docks, regardless of which one a
+/// user's drag-and-drop left it in.
+fn locate_panel<T: Panel>(dock_area: &Entity<DockArea>, cx: &App) -> Option<Entity<T>> {
+    let area = dock_area.read(cx);
+    [
+        Some(area.center()),
+        area.left_dock().map(|dock| dock.read(cx).panel()),
+        area.right_dock().map(|dock| dock.read(cx).panel()),
+        area.bottom_dock().map(|dock| dock.read(cx).panel()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(find_in_item)
+}
+
+fn find_in_item<T: Panel>(item: &DockItem) -> Option<Entity<T>> {
+    match item {
+        DockItem::Panel { view, .. } => view.view().downcast::<T>().ok(),
+        DockItem::Tabs { items, .. } => items
+            .iter()
+            .find_map(|view| view.view().downcast::<T>().ok()),
+        DockItem::Split { items, .. } => items.iter().find_map(find_in_item),
+        DockItem::Tiles { .. } => None,
+    }
+}
+
+fn repository_display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn title_bar(
-    repo: &PlaceholderRepository,
+    repository_name: &str,
+    head: &LoadState<HeadState>,
     sidebar_collapsed: bool,
     cx: &mut Context<Workspace>,
 ) -> TitleBar {
-    let branch = repo
-        .head
-        .branch()
-        .map(|branch| branch.to_string())
-        .unwrap_or_else(|| "detached HEAD".to_string());
-    let title = format!("gitr — {} · {branch}", repo.name);
+    let branch = match head {
+        LoadState::Ready(head) => head
+            .branch()
+            .map(|branch| branch.to_string())
+            .unwrap_or_else(|| "detached HEAD".to_string()),
+        LoadState::Idle | LoadState::Loading => "…".to_string(),
+        LoadState::Failed(_) => "unknown".to_string(),
+    };
+    let title = format!("gitr — {repository_name} · {branch}");
 
     TitleBar::new().child(
         h_flex()
@@ -235,44 +356,50 @@ fn title_bar(
     )
 }
 
-fn status_bar(repo: &PlaceholderRepository, cx: &mut Context<Workspace>) -> StatusBar {
+fn status_bar(history: &LoadState<Arc<History>>, cx: &mut Context<Workspace>) -> StatusBar {
     let is_dark = cx.theme().is_dark();
+    let commit_count = match history {
+        LoadState::Ready(history) => format!("{} commits", history.len()),
+        LoadState::Idle | LoadState::Loading => "Loading…".to_string(),
+        LoadState::Failed(_) => "History unavailable".to_string(),
+    };
 
-    StatusBar::new()
-        .left(format!("{} commits", repo.commit_count))
-        .right(
-            Button::new("toggle-theme")
-                .ghost()
-                .xsmall()
-                .icon(if is_dark {
-                    IconName::Sun
+    StatusBar::new().left(commit_count).right(
+        Button::new("toggle-theme")
+            .ghost()
+            .xsmall()
+            .icon(if is_dark {
+                IconName::Sun
+            } else {
+                IconName::Moon
+            })
+            .tooltip(if is_dark {
+                "Switch to light theme"
+            } else {
+                "Switch to dark theme"
+            })
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.follow_system_theme = false;
+                let next = if cx.theme().is_dark() {
+                    ThemeMode::Light
                 } else {
-                    IconName::Moon
-                })
-                .tooltip(if is_dark {
-                    "Switch to light theme"
-                } else {
-                    "Switch to dark theme"
-                })
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.follow_system_theme = false;
-                    let next = if cx.theme().is_dark() {
-                        ThemeMode::Light
-                    } else {
-                        ThemeMode::Dark
-                    };
-                    Theme::change(next, Some(window), cx);
-                })),
-        )
+                    ThemeMode::Dark
+                };
+                Theme::change(next, Some(window), cx);
+            })),
+    )
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let repo_index = self.selected_repository;
         let sidebar_collapsed = self.sidebar_collapsed;
-        let repo_names: Vec<String> = self.repositories.iter().map(|r| r.name.clone()).collect();
         let dock_area = self.dock_area.clone();
-        let repo = &self.repositories[repo_index];
+
+        let path = self.repository.read(cx).path().to_path_buf();
+        let head = self.repository.read(cx).head().clone();
+        let references = self.repository.read(cx).references().clone();
+        let history = self.repository.read(cx).history().clone();
+        let repository_name = repository_display_name(&path);
 
         let sheet_layer = Root::render_sheet_layer(window, cx);
         let dialog_layer = Root::render_dialog_layer(window, cx);
@@ -284,7 +411,7 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .child(title_bar(repo, sidebar_collapsed, cx))
+            .child(title_bar(&repository_name, &head, sidebar_collapsed, cx))
             .child(
                 div()
                     .flex_1()
@@ -292,15 +419,15 @@ impl Render for Workspace {
                     .flex()
                     .flex_row()
                     .child(sidebar::render(
-                        repo,
-                        &repo_names,
-                        repo_index,
+                        &references,
+                        &head,
+                        &repository_name,
                         sidebar_collapsed,
                         cx,
                     ))
                     .child(div().flex_1().min_w_0().child(dock_area)),
             )
-            .child(status_bar(repo, cx))
+            .child(status_bar(&history, cx))
             .children(sheet_layer)
             .children(dialog_layer)
             .children(notification_layer)

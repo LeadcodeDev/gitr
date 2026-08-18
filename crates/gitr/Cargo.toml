@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 ui.workspace = true
+domain.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-component.workspace = true
