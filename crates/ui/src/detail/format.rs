@@ -1,15 +1,22 @@
-//! Pure formatting and classification logic for the commit detail panel.
+//! Pure formatting logic for the commit detail panel.
 //!
 //! Nothing here touches gpui's `App` or `Window`: every function is a plain transformation
-//! from domain types to strings or theme colours, so it is testable without a running
-//! window. `ThemeColor::light()` and `ThemeColor::dark()` work the same way, which is what
-//! makes `classify_line` testable against both palettes below.
+//! from domain types to strings, so it is testable without a running window.
 
+use std::fmt::Write as _;
+use std::ops::Range;
 use std::path::PathBuf;
 
-use domain::{FilePatch, FileStatus, Hunk, LineOrigin, ObjectId, Timestamp};
-use gpui::Hsla;
-use gpui_component::ThemeColor;
+use domain::{FilePatch, FileStatus, Hunk, LineOrigin, ObjectId, Patch, Timestamp};
+
+/// The UTF-8 byte range, into the text [`unified_diff_text_with_line_ranges`] produces,
+/// of every added and every deleted line — everything else (file headers, hunk headers,
+/// context lines) is left undecorated.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DiffLineRanges {
+    pub additions: Vec<Range<usize>>,
+    pub deletions: Vec<Range<usize>>,
+}
 
 /// Hexadecimal characters kept when an identifier is shown abbreviated, matching Git's
 /// own default abbreviation length.
@@ -66,37 +73,23 @@ pub fn format_timestamp(timestamp: Timestamp) -> String {
     format!("{day} {month_name} {year} at {hour:02}:{minute:02}:{second:02}")
 }
 
-/// A file's `+added −deleted` summary.
-pub fn diff_stat(file: &FilePatch) -> String {
-    format!("+{} \u{2212}{}", file.added_lines(), file.deleted_lines())
-}
-
-fn path_or_empty(path: Option<&PathBuf>) -> String {
-    path.map(|path| path.display().to_string())
-        .unwrap_or_default()
-}
-
-/// The label half of a file's header: everything but the `+n −m` summary, which
-/// [`diff_stat`] renders separately so a view can lay the two out independently.
-pub fn file_header(file: &FilePatch) -> String {
-    match &file.status {
-        FileStatus::Added => format!("{} (new file)", path_or_empty(file.display_path())),
-        FileStatus::Deleted => format!("{} (deleted)", path_or_empty(file.display_path())),
-        FileStatus::TypeChanged => {
-            format!("{} (type changed)", path_or_empty(file.display_path()))
+/// Backslash-escapes every ASCII punctuation character, CommonMark's own escapable set.
+///
+/// A commit subject, identifier or author line is plain text, not Markdown source, but
+/// the detail panel renders it through [`gpui_component::text::markdown`] to get
+/// selectable text. Without this, a subject like `fix_bug` or `[WIP] release` would pick
+/// up italics or link syntax it never asked for; escaping every ASCII punctuation
+/// character, regardless of position, is what CommonMark guarantees always renders as a
+/// literal character.
+pub fn escape_markdown(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_ascii_punctuation() {
+            escaped.push('\\');
         }
-        FileStatus::Modified => path_or_empty(file.display_path()),
-        FileStatus::Renamed { similarity } => format!(
-            "{} \u{2192} {} ({similarity}% similar)",
-            path_or_empty(file.old_path.as_ref()),
-            path_or_empty(file.new_path.as_ref())
-        ),
-        FileStatus::Copied { similarity } => format!(
-            "{} \u{2192} {} (copied, {similarity}% similar)",
-            path_or_empty(file.old_path.as_ref()),
-            path_or_empty(file.new_path.as_ref())
-        ),
+        escaped.push(ch);
     }
+    escaped
 }
 
 /// A hunk's `@@ -old,len +new,len @@ heading` marker line.
@@ -112,48 +105,117 @@ pub fn hunk_heading(hunk: &Hunk) -> String {
     }
 }
 
-/// What a file's body should show.
-///
-/// `hunks` is empty both for a binary file and for a pure rename, and [`FilePatch::is_binary`]
-/// is the only thing that tells them apart.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileBody<'a> {
-    Binary,
-    NoTextChange,
-    Hunks(&'a [Hunk]),
+fn git_path(path: Option<&PathBuf>) -> Option<String> {
+    path.map(|path| path.display().to_string())
 }
 
-pub fn file_body(file: &FilePatch) -> FileBody<'_> {
-    if file.is_binary {
-        FileBody::Binary
-    } else if file.hunks.is_empty() {
-        FileBody::NoTextChange
-    } else {
-        FileBody::Hunks(&file.hunks)
+/// The path a `diff --git a/<path> b/<path>` line shows for one side.
+///
+/// Git always prints *some* path on both sides of that line, falling back to the other
+/// side's path when this one doesn't exist (an added or deleted file) — the two sides
+/// only ever truly differ for a rename or a copy.
+fn git_header_path(path: Option<&PathBuf>, other: Option<&PathBuf>) -> String {
+    git_path(path)
+        .or_else(|| git_path(other))
+        .unwrap_or_default()
+}
+
+/// The `a/<path>` / `b/<path>` / `/dev/null` form Git uses on a `---`, `+++` or `Binary
+/// files` line, where — unlike [`git_header_path`] — a missing side stays `/dev/null`
+/// rather than borrowing the other side's path.
+fn side_path(path: Option<&PathBuf>, prefix: char) -> String {
+    match git_path(path) {
+        Some(path) => format!("{prefix}/{path}"),
+        None => "/dev/null".to_string(),
     }
 }
 
-/// The colours one [`DiffLine`] renders with.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LineColors {
-    pub foreground: Hsla,
-    pub background: Option<Hsla>,
+/// Rebuilds the unified diff text `git diff` would print for `patch` — so it can be fed
+/// to a real editor for syntax highlighting, selection and virtualised scrolling — paired
+/// with the byte range of every added and deleted line, computed in the same pass so the
+/// text and the ranges can never disagree about where a line starts. Reconstructing the
+/// text and then re-scanning it for `+`/`-` lines would be a second implementation of the
+/// same rule, and a line whose own content begins with `+` or `-` is exactly where the
+/// two could differ.
+///
+/// Mode lines (`new file mode`, `deleted file mode`) are Git prints that [`FilePatch`] has
+/// no data for, and are left out rather than fabricated. Each range starts at the line's
+/// leading marker byte, read from [`LineOrigin`] structurally rather than from the first
+/// byte of `line.content` — a line about a diff can itself start with `+` or `-`.
+pub fn unified_diff_text_with_line_ranges(patch: &Patch) -> (String, DiffLineRanges) {
+    let mut text = String::new();
+    let mut ranges = DiffLineRanges::default();
+    for file in &patch.files {
+        write_file(&mut text, file, &mut ranges);
+    }
+    (text, ranges)
 }
 
-pub fn classify_line(origin: LineOrigin, theme: &ThemeColor) -> LineColors {
-    match origin {
-        LineOrigin::Addition => LineColors {
-            foreground: theme.green,
-            background: Some(theme.green_light),
-        },
-        LineOrigin::Deletion => LineColors {
-            foreground: theme.red,
-            background: Some(theme.red_light),
-        },
-        LineOrigin::Context => LineColors {
-            foreground: theme.foreground,
-            background: None,
-        },
+fn write_file(text: &mut String, file: &FilePatch, ranges: &mut DiffLineRanges) {
+    let old = file.old_path.as_ref();
+    let new = file.new_path.as_ref();
+
+    let _ = writeln!(
+        text,
+        "diff --git a/{} b/{}",
+        git_header_path(old, new),
+        git_header_path(new, old)
+    );
+
+    match &file.status {
+        FileStatus::Renamed { similarity } => {
+            let _ = writeln!(text, "similarity index {similarity}%");
+            if let (Some(old), Some(new)) = (git_path(old), git_path(new)) {
+                let _ = writeln!(text, "rename from {old}");
+                let _ = writeln!(text, "rename to {new}");
+            }
+        }
+        FileStatus::Copied { similarity } => {
+            let _ = writeln!(text, "similarity index {similarity}%");
+            if let (Some(old), Some(new)) = (git_path(old), git_path(new)) {
+                let _ = writeln!(text, "copy from {old}");
+                let _ = writeln!(text, "copy to {new}");
+            }
+        }
+        FileStatus::Added
+        | FileStatus::Deleted
+        | FileStatus::Modified
+        | FileStatus::TypeChanged => {}
+    }
+
+    if file.is_binary {
+        let _ = writeln!(
+            text,
+            "Binary files {} and {} differ",
+            side_path(old, 'a'),
+            side_path(new, 'b')
+        );
+        return;
+    }
+
+    if file.hunks.is_empty() {
+        return;
+    }
+
+    let _ = writeln!(text, "--- {}", side_path(old, 'a'));
+    let _ = writeln!(text, "+++ {}", side_path(new, 'b'));
+    for hunk in &file.hunks {
+        let _ = writeln!(text, "{}", hunk_heading(hunk));
+        for line in &hunk.lines {
+            let marker = match line.origin {
+                LineOrigin::Addition => '+',
+                LineOrigin::Deletion => '-',
+                LineOrigin::Context => ' ',
+            };
+            let start = text.len();
+            let _ = writeln!(text, "{marker}{}", line.content);
+            let end = text.len() - 1;
+            match line.origin {
+                LineOrigin::Addition => ranges.additions.push(start..end),
+                LineOrigin::Deletion => ranges.deletions.push(start..end),
+                LineOrigin::Context => {}
+            }
+        }
     }
 }
 
@@ -162,14 +224,24 @@ mod tests {
     use super::*;
     use domain::DiffLine;
 
+    fn unified_diff_text(patch: &Patch) -> String {
+        unified_diff_text_with_line_ranges(patch).0
+    }
+
     fn id(nibble: char) -> ObjectId {
         nibble.to_string().repeat(40).parse().unwrap()
     }
 
-    fn file(status: FileStatus, is_binary: bool, hunks: Vec<Hunk>) -> FilePatch {
+    fn file(
+        old_path: Option<&str>,
+        new_path: Option<&str>,
+        status: FileStatus,
+        is_binary: bool,
+        hunks: Vec<Hunk>,
+    ) -> FilePatch {
         FilePatch {
-            old_path: Some(PathBuf::from("old.rs")),
-            new_path: Some(PathBuf::from("new.rs")),
+            old_path: old_path.map(PathBuf::from),
+            new_path: new_path.map(PathBuf::from),
             status,
             is_binary,
             hunks,
@@ -179,20 +251,20 @@ mod tests {
     fn hunk(lines: Vec<DiffLine>) -> Hunk {
         Hunk {
             old_start: 1,
-            old_lines: 7,
+            old_lines: 1,
             new_start: 1,
-            new_lines: 9,
+            new_lines: 2,
             heading: "fn existing()".to_string(),
             lines,
         }
     }
 
-    fn line(origin: LineOrigin) -> DiffLine {
+    fn line(origin: LineOrigin, content: &str) -> DiffLine {
         DiffLine {
             origin,
             old_number: None,
             new_number: None,
-            content: String::new(),
+            content: content.to_string(),
         }
     }
 
@@ -238,153 +310,248 @@ mod tests {
     }
 
     #[test]
-    fn diff_stat_reports_additions_and_deletions_with_a_minus_sign() {
-        let patch = file(
-            FileStatus::Modified,
-            false,
-            vec![hunk(vec![
-                DiffLine {
-                    new_number: Some(1),
-                    ..line(LineOrigin::Addition)
-                },
-                DiffLine {
-                    new_number: Some(2),
-                    ..line(LineOrigin::Addition)
-                },
-                DiffLine {
-                    old_number: Some(1),
-                    ..line(LineOrigin::Deletion)
-                },
-            ])],
-        );
-        assert_eq!(diff_stat(&patch), "+2 \u{2212}1");
-    }
-
-    #[test]
-    fn diff_stat_of_an_untouched_file_is_zero_and_zero() {
-        let patch = file(FileStatus::Modified, false, vec![]);
-        assert_eq!(diff_stat(&patch), "+0 \u{2212}0");
-    }
-
-    #[test]
-    fn file_header_reports_a_rename_as_old_arrow_new_with_similarity() {
-        let patch = file(FileStatus::Renamed { similarity: 87 }, false, vec![]);
-        assert_eq!(file_header(&patch), "old.rs \u{2192} new.rs (87% similar)");
-    }
-
-    #[test]
-    fn file_header_reports_a_copy_as_old_arrow_new_with_similarity() {
-        let patch = file(FileStatus::Copied { similarity: 60 }, false, vec![]);
-        assert_eq!(
-            file_header(&patch),
-            "old.rs \u{2192} new.rs (copied, 60% similar)"
-        );
-    }
-
-    #[test]
-    fn file_header_marks_an_added_file() {
-        let mut patch = file(FileStatus::Added, false, vec![]);
-        patch.old_path = None;
-        assert_eq!(file_header(&patch), "new.rs (new file)");
-    }
-
-    #[test]
-    fn file_header_marks_a_deleted_file() {
-        let mut patch = file(FileStatus::Deleted, false, vec![]);
-        patch.new_path = None;
-        assert_eq!(file_header(&patch), "old.rs (deleted)");
-    }
-
-    #[test]
-    fn file_header_marks_a_type_change() {
-        let patch = file(FileStatus::TypeChanged, false, vec![]);
-        assert_eq!(file_header(&patch), "new.rs (type changed)");
-    }
-
-    #[test]
-    fn file_header_of_a_plain_modification_is_just_the_path() {
-        let patch = file(FileStatus::Modified, false, vec![]);
-        assert_eq!(file_header(&patch), "new.rs");
-    }
-
-    #[test]
     fn hunk_heading_includes_the_function_context_when_git_found_one() {
-        assert_eq!(hunk_heading(&hunk(vec![])), "@@ -1,7 +1,9 @@ fn existing()");
+        assert_eq!(hunk_heading(&hunk(vec![])), "@@ -1,1 +1,2 @@ fn existing()");
     }
 
     #[test]
     fn hunk_heading_omits_the_trailing_space_when_git_found_no_context() {
         let mut hunk = hunk(vec![]);
         hunk.heading = String::new();
-        assert_eq!(hunk_heading(&hunk), "@@ -1,7 +1,9 @@");
+        assert_eq!(hunk_heading(&hunk), "@@ -1,1 +1,2 @@");
     }
 
     #[test]
-    fn a_binary_file_and_a_pure_rename_both_have_empty_hunks_but_render_differently() {
-        let binary = file(FileStatus::Modified, true, vec![]);
-        let pure_rename = file(FileStatus::Renamed { similarity: 100 }, false, vec![]);
-
-        assert_eq!(file_body(&binary), FileBody::Binary);
-        assert_eq!(file_body(&pure_rename), FileBody::NoTextChange);
-        assert_ne!(file_body(&binary), file_body(&pure_rename));
+    fn escape_markdown_neutralises_ascii_punctuation_without_touching_letters_digits_or_spaces() {
+        assert_eq!(
+            escape_markdown("fix_bug 100% [WIP] (v1)"),
+            "fix\\_bug 100\\% \\[WIP\\] \\(v1\\)"
+        );
     }
 
     #[test]
-    fn a_file_with_hunks_exposes_them_for_rendering() {
-        let lines = vec![DiffLine {
-            content: "line".into(),
-            ..line(LineOrigin::Context)
-        }];
-        let patch = file(FileStatus::Modified, false, vec![hunk(lines.clone())]);
-        assert_eq!(file_body(&patch), FileBody::Hunks(&[hunk(lines)]));
+    fn escape_markdown_escapes_a_literal_backslash_first() {
+        assert_eq!(escape_markdown("a\\b"), "a\\\\b");
     }
 
     #[test]
-    fn an_empty_patch_has_no_files() {
-        let patch = domain::Patch { files: vec![] };
-        assert!(patch.files.is_empty());
+    fn escape_markdown_leaves_non_ascii_text_untouched() {
+        assert_eq!(
+            escape_markdown("caf\u{e9} \u{2014} r\u{e9}sum\u{e9}"),
+            "caf\u{e9} \u{2014} r\u{e9}sum\u{e9}"
+        );
     }
 
     #[test]
-    fn a_mode_only_change_has_no_hunks_and_no_line_totals() {
-        let patch = file(FileStatus::Modified, false, vec![]);
-        assert_eq!(file_body(&patch), FileBody::NoTextChange);
-        assert_eq!(diff_stat(&patch), "+0 \u{2212}0");
+    fn unified_diff_text_of_an_empty_patch_is_empty() {
+        let patch = Patch { files: vec![] };
+        assert_eq!(unified_diff_text(&patch), "");
     }
 
     #[test]
-    fn classify_line_uses_green_for_additions_in_both_palettes() {
-        for theme in [ThemeColor::light(), ThemeColor::dark()] {
-            let colors = classify_line(LineOrigin::Addition, &theme);
-            assert_eq!(colors.foreground, theme.green);
-            assert_eq!(colors.background, Some(theme.green_light));
+    fn unified_diff_text_reconstructs_a_single_hunk() {
+        let patch = Patch {
+            files: vec![file(
+                Some("src/lib.rs"),
+                Some("src/lib.rs"),
+                FileStatus::Modified,
+                false,
+                vec![hunk(vec![
+                    line(LineOrigin::Context, "fn existing() {"),
+                    line(LineOrigin::Deletion, "    old();"),
+                    line(LineOrigin::Addition, "    new();"),
+                    line(LineOrigin::Addition, "    more();"),
+                ])],
+            )],
+        };
+        assert_eq!(
+            unified_diff_text(&patch),
+            "diff --git a/src/lib.rs b/src/lib.rs\n".to_string()
+                + "--- a/src/lib.rs\n"
+                + "+++ b/src/lib.rs\n"
+                + "@@ -1,1 +1,2 @@ fn existing()\n"
+                + " fn existing() {\n"
+                + "-    old();\n"
+                + "+    new();\n"
+                + "+    more();\n"
+        );
+    }
+
+    #[test]
+    fn unified_diff_text_uses_dev_null_for_an_added_file() {
+        let patch = Patch {
+            files: vec![file(
+                None,
+                Some("new.rs"),
+                FileStatus::Added,
+                false,
+                vec![hunk(vec![line(LineOrigin::Addition, "fn new() {}")])],
+            )],
+        };
+        let text = unified_diff_text(&patch);
+        assert!(text.starts_with("diff --git a/new.rs b/new.rs\n"));
+        assert!(text.contains("--- /dev/null\n"));
+        assert!(text.contains("+++ b/new.rs\n"));
+    }
+
+    #[test]
+    fn unified_diff_text_uses_dev_null_for_a_deleted_file() {
+        let patch = Patch {
+            files: vec![file(
+                Some("old.rs"),
+                None,
+                FileStatus::Deleted,
+                false,
+                vec![hunk(vec![line(LineOrigin::Deletion, "fn old() {}")])],
+            )],
+        };
+        let text = unified_diff_text(&patch);
+        assert!(text.starts_with("diff --git a/old.rs b/old.rs\n"));
+        assert!(text.contains("--- a/old.rs\n"));
+        assert!(text.contains("+++ /dev/null\n"));
+    }
+
+    #[test]
+    fn unified_diff_text_marks_binary_files_without_a_hunk() {
+        let patch = Patch {
+            files: vec![file(
+                Some("image.png"),
+                Some("image.png"),
+                FileStatus::Modified,
+                true,
+                vec![],
+            )],
+        };
+        assert_eq!(
+            unified_diff_text(&patch),
+            "diff --git a/image.png b/image.png\nBinary files a/image.png and b/image.png differ\n"
+        );
+    }
+
+    #[test]
+    fn unified_diff_text_includes_rename_headers_and_omits_hunks_for_a_pure_rename() {
+        let patch = Patch {
+            files: vec![file(
+                Some("old.rs"),
+                Some("new.rs"),
+                FileStatus::Renamed { similarity: 87 },
+                false,
+                vec![],
+            )],
+        };
+        assert_eq!(
+            unified_diff_text(&patch),
+            "diff --git a/old.rs b/new.rs\n\
+             similarity index 87%\n\
+             rename from old.rs\n\
+             rename to new.rs\n"
+        );
+    }
+
+    #[test]
+    fn unified_diff_text_includes_copy_headers() {
+        let patch = Patch {
+            files: vec![file(
+                Some("old.rs"),
+                Some("copy.rs"),
+                FileStatus::Copied { similarity: 100 },
+                false,
+                vec![],
+            )],
+        };
+        let text = unified_diff_text(&patch);
+        assert!(text.contains("copy from old.rs\n"));
+        assert!(text.contains("copy to copy.rs\n"));
+    }
+
+    #[test]
+    fn unified_diff_text_concatenates_multiple_files_in_order() {
+        let patch = Patch {
+            files: vec![
+                file(
+                    Some("a.rs"),
+                    Some("a.rs"),
+                    FileStatus::Modified,
+                    false,
+                    vec![hunk(vec![line(LineOrigin::Addition, "a")])],
+                ),
+                file(
+                    Some("b.rs"),
+                    Some("b.rs"),
+                    FileStatus::Modified,
+                    false,
+                    vec![hunk(vec![line(LineOrigin::Addition, "b")])],
+                ),
+            ],
+        };
+        let text = unified_diff_text(&patch);
+        let a_pos = text.find("diff --git a/a.rs").unwrap();
+        let b_pos = text.find("diff --git a/b.rs").unwrap();
+        assert!(a_pos < b_pos);
+    }
+
+    #[test]
+    fn line_ranges_cover_additions_and_deletions_and_nothing_else() {
+        let patch = Patch {
+            files: vec![file(
+                Some("src/lib.rs"),
+                Some("src/lib.rs"),
+                FileStatus::Modified,
+                false,
+                vec![hunk(vec![
+                    line(LineOrigin::Context, "fn existing() {"),
+                    line(LineOrigin::Deletion, "    old();"),
+                    line(LineOrigin::Addition, "    new();"),
+                ])],
+            )],
+        };
+        let (text, ranges) = unified_diff_text_with_line_ranges(&patch);
+
+        assert_eq!(ranges.additions.len(), 1);
+        assert_eq!(ranges.deletions.len(), 1);
+
+        let addition = &text[ranges.additions[0].clone()];
+        assert_eq!(addition, "+    new();");
+
+        let deletion = &text[ranges.deletions[0].clone()];
+        assert_eq!(deletion, "-    old();");
+
+        let file_header_pos = text.find("diff --git").unwrap();
+        let hunk_header_pos = text.find("@@").unwrap();
+        let context_pos = text.find(" fn existing() {").unwrap();
+        for range in ranges.additions.iter().chain(&ranges.deletions) {
+            assert!(!range.contains(&file_header_pos));
+            assert!(!range.contains(&hunk_header_pos));
+            assert!(!range.contains(&context_pos));
         }
     }
 
     #[test]
-    fn classify_line_uses_red_for_deletions_in_both_palettes() {
-        for theme in [ThemeColor::light(), ThemeColor::dark()] {
-            let colors = classify_line(LineOrigin::Deletion, &theme);
-            assert_eq!(colors.foreground, theme.red);
-            assert_eq!(colors.background, Some(theme.red_light));
-        }
-    }
+    fn line_ranges_are_read_from_the_marker_column_not_the_lines_own_content() {
+        let patch = Patch {
+            files: vec![file(
+                Some("src/lib.rs"),
+                Some("src/lib.rs"),
+                FileStatus::Modified,
+                false,
+                vec![hunk(vec![
+                    line(LineOrigin::Context, "+not actually an addition"),
+                    line(LineOrigin::Addition, "-not actually a deletion"),
+                    line(LineOrigin::Deletion, "+not actually an addition either"),
+                ])],
+            )],
+        };
+        let (text, ranges) = unified_diff_text_with_line_ranges(&patch);
 
-    #[test]
-    fn classify_line_leaves_context_lines_uncoloured_in_both_palettes() {
-        for theme in [ThemeColor::light(), ThemeColor::dark()] {
-            let colors = classify_line(LineOrigin::Context, &theme);
-            assert_eq!(colors.foreground, theme.foreground);
-            assert_eq!(colors.background, None);
-        }
-    }
+        assert_eq!(ranges.additions.len(), 1);
+        assert_eq!(ranges.deletions.len(), 1);
 
-    #[test]
-    fn addition_and_deletion_colours_are_distinct_in_both_palettes() {
-        for theme in [ThemeColor::light(), ThemeColor::dark()] {
-            let addition = classify_line(LineOrigin::Addition, &theme);
-            let deletion = classify_line(LineOrigin::Deletion, &theme);
-            assert_ne!(addition.foreground, deletion.foreground);
-        }
+        let addition = &text[ranges.additions[0].clone()];
+        assert!(addition.starts_with('+'));
+        assert_eq!(addition, "+-not actually a deletion");
+
+        let deletion = &text[ranges.deletions[0].clone()];
+        assert!(deletion.starts_with('-'));
+        assert_eq!(deletion, "-+not actually an addition either");
     }
 }

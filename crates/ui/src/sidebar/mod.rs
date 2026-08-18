@@ -9,13 +9,14 @@
 //! does not load working-tree changes or stashes yet, so there is nothing real to show.
 
 pub mod branch_tree;
+pub mod tree;
 
 use domain::{HeadState, Reference};
 use gpui::{App, Context, IntoElement, ParentElement as _, Styled as _, WeakEntity, div};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, StyledExt as _,
     menu::{DropdownMenu as _, PopupMenuItem},
-    sidebar::{Sidebar, SidebarHeader, SidebarMenu, SidebarMenuItem},
+    sidebar::{Sidebar, SidebarHeader},
 };
 
 use crate::{
@@ -23,13 +24,15 @@ use crate::{
     workspace::Workspace,
 };
 
+use tree::SidebarTreeItem;
+
 pub(crate) fn render(
     references: &LoadState<ReferenceIndex>,
     head: &LoadState<HeadState>,
     repository_name: &str,
     collapsed: bool,
     cx: &mut Context<Workspace>,
-) -> Sidebar<SidebarMenu> {
+) -> Sidebar<SidebarTreeItem> {
     let active_branch = head
         .ready()
         .and_then(HeadState::branch)
@@ -48,7 +51,7 @@ pub(crate) fn render(
     Sidebar::new("repository-sidebar")
         .collapsed(collapsed)
         .header(repository_header(cx, repository_name, collapsed))
-        .child(SidebarMenu::new().children(items))
+        .children(items)
 }
 
 /// The repository selector, keeping the shape a future multi-repository window will
@@ -89,22 +92,22 @@ fn repository_header(cx: &App, repository_name: &str, collapsed: bool) -> impl I
         .dropdown_menu(move |menu, _, _| menu.item(PopupMenuItem::new(name.clone()).checked(true)))
 }
 
-fn working_item() -> SidebarMenuItem {
-    SidebarMenuItem::new("Working").icon(IconName::FolderOpen)
+fn working_item() -> SidebarTreeItem {
+    SidebarTreeItem::new("Working").icon(IconName::FolderOpen)
 }
 
 fn tree_item(
     node: &branch_tree::RefTreeNode,
     active: Option<&Reference>,
     workspace: &WeakEntity<Workspace>,
-) -> SidebarMenuItem {
+) -> SidebarTreeItem {
     let is_active = node
         .reference
         .as_ref()
         .zip(active)
         .is_some_and(|(reference, active)| reference == active);
 
-    let mut item = SidebarMenuItem::new(node.segment.clone()).active(is_active);
+    let mut item = SidebarTreeItem::new(node.segment.clone()).active(is_active);
 
     if let Some(reference) = node.reference.clone() {
         let workspace = workspace.clone();
@@ -130,7 +133,7 @@ fn branches_item(
     index: Option<&ReferenceIndex>,
     active: Option<&Reference>,
     workspace: &WeakEntity<Workspace>,
-) -> SidebarMenuItem {
+) -> SidebarTreeItem {
     let references = index.into_iter().flat_map(|index| {
         index
             .local_branches
@@ -138,7 +141,7 @@ fn branches_item(
             .map(|entry| entry.reference.clone())
     });
     let tree = branch_tree::group_by_path(references);
-    let mut item = SidebarMenuItem::new("Branches").icon(IconName::Network);
+    let mut item = SidebarTreeItem::new("Branches").icon(IconName::Network);
 
     if !tree.is_empty() {
         item = item
@@ -153,7 +156,7 @@ fn remotes_item(
     index: Option<&ReferenceIndex>,
     active: Option<&Reference>,
     workspace: &WeakEntity<Workspace>,
-) -> SidebarMenuItem {
+) -> SidebarTreeItem {
     let references = index.into_iter().flat_map(|index| {
         index
             .remote_branches
@@ -161,7 +164,7 @@ fn remotes_item(
             .map(|entry| entry.reference.clone())
     });
     let tree = branch_tree::group_by_path(references);
-    let mut item = SidebarMenuItem::new("Remotes").icon(IconName::Globe);
+    let mut item = SidebarTreeItem::new("Remotes").icon(IconName::Globe);
 
     if !tree.is_empty() {
         item = item.children(tree.iter().map(|node| tree_item(node, active, workspace)));
@@ -170,12 +173,12 @@ fn remotes_item(
     item
 }
 
-fn tags_item(index: Option<&ReferenceIndex>, workspace: &WeakEntity<Workspace>) -> SidebarMenuItem {
+fn tags_item(index: Option<&ReferenceIndex>, workspace: &WeakEntity<Workspace>) -> SidebarTreeItem {
     let references = index
         .into_iter()
         .flat_map(|index| index.tags.iter().map(|entry| entry.reference.clone()));
     let tree = branch_tree::group_by_path(references);
-    let mut item = SidebarMenuItem::new("Tags");
+    let mut item = SidebarTreeItem::new("Tags");
 
     if !tree.is_empty() {
         item = item.children(tree.iter().map(|node| tree_item(node, None, workspace)));
@@ -184,6 +187,6 @@ fn tags_item(index: Option<&ReferenceIndex>, workspace: &WeakEntity<Workspace>) 
     item
 }
 
-fn stashes_item() -> SidebarMenuItem {
-    SidebarMenuItem::new("Stashes")
+fn stashes_item() -> SidebarTreeItem {
+    SidebarTreeItem::new("Stashes")
 }

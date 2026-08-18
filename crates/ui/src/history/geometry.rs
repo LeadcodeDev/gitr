@@ -8,10 +8,10 @@ use gpui::{Pixels, Point, point, px};
 use graph::{GraphRow, Lane, LaneColor};
 
 /// Horizontal distance between two adjacent lane centres.
-pub const LANE_SPACING: Pixels = px(16.);
+pub const LANE_SPACING: Pixels = px(12.);
 
 /// Radius of a commit's own node.
-pub const NODE_RADIUS: Pixels = px(4.);
+pub const NODE_RADIUS: Pixels = px(3.);
 
 /// Stroke width of a graph line.
 pub const LINE_WIDTH: Pixels = px(1.5);

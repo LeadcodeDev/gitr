@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use domain::{CommitSummary, ObjectId, Reference};
 use gpui::{
-    AnyElement, App, Bounds, Context, IntoElement, ParentElement as _, PathBuilder, Pixels,
-    SharedString, Styled as _, Window, canvas, div, fill, point, px, size,
+    AnyElement, App, Bounds, Context, Div, InteractiveElement as _, IntoElement,
+    ParentElement as _, PathBuilder, Pixels, SharedString, Stateful, Styled as _, Window, canvas,
+    div, fill, point, px, size,
 };
 use gpui_component::{
     ActiveTheme as _, ThemeColor, h_flex,
@@ -128,6 +129,24 @@ impl TableDelegate for HistoryTableDelegate {
 
     fn loading(&self, _: &App) -> bool {
         self.history.is_loading()
+    }
+
+    /// Overridden to drop `TableState`'s own per-row bottom border.
+    ///
+    /// That border is one continuous `h_flex` spanning every column, the graph column
+    /// included, so it cut each lane into a per-row fragment instead of letting a line
+    /// leaving the bottom of one row meet the line entering the top of the next. Row
+    /// separation comes from the stripe (`DataTable::stripe`) instead; `TableState`
+    /// captures this style before drawing its own border and re-applies it afterward via
+    /// `refine_style`, so an explicit `border_b_0()` here overrides that border rather
+    /// than merely leaving it unset.
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        div().id(("row", row_ix)).border_b_0()
     }
 
     fn render_empty(

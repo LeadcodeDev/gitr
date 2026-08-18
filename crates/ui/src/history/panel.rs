@@ -22,6 +22,7 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::density;
 use crate::repository::model::{History, HistoryFilter, LoadState};
 
 use super::delegate::HistoryTableDelegate;
@@ -33,6 +34,11 @@ use super::delegate::HistoryTableDelegate;
 /// back out would loop.
 pub enum HistoryPanelEvent {
     Selected(ObjectId),
+    /// A row was double-clicked. Always accompanied by a [`Self::Selected`] for the
+    /// same commit: [`TableState`] selects a row unconditionally on every left click,
+    /// and only then, on the second click of a pair, emits the double-click on top
+    /// of that same row.
+    DoubleClicked(ObjectId),
     FilterChanged(HistoryFilter),
 }
 
@@ -136,17 +142,25 @@ impl HistoryPanel {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let TableEvent::SelectRow(row_ix) = event else {
-            return;
-        };
+        match event {
+            TableEvent::SelectRow(row_ix) => {
+                let Some(commit) = table.read(cx).delegate().commit_at(*row_ix) else {
+                    return;
+                };
 
-        let Some(commit) = table.read(cx).delegate().commit_at(*row_ix) else {
-            return;
-        };
+                self.selected = Some(commit);
+                cx.emit(HistoryPanelEvent::Selected(commit));
+                cx.notify();
+            }
+            TableEvent::DoubleClickedRow(row_ix) => {
+                let Some(commit) = table.read(cx).delegate().commit_at(*row_ix) else {
+                    return;
+                };
 
-        self.selected = Some(commit);
-        cx.emit(HistoryPanelEvent::Selected(commit));
-        cx.notify();
+                cx.emit(HistoryPanelEvent::DoubleClicked(commit));
+            }
+            _ => {}
+        }
     }
 
     fn on_search_event(
@@ -206,7 +220,7 @@ impl Render for HistoryPanel {
 
         let mut tabs = TabBar::new("history-scope")
             .segmented()
-            .xsmall()
+            .small()
             .on_click(cx.listener(|this, index: &usize, _, cx| {
                 if let Some(scope) = scope_options(&this.branch_scope).get(*index).cloned() {
                     this.select_scope(scope, cx);
@@ -240,10 +254,12 @@ impl Render for HistoryPanel {
                     ),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(DataTable::new(&self.table).stripe(true)),
+                div().flex_1().min_h_0().child(
+                    DataTable::new(&self.table)
+                        .stripe(true)
+                        .bordered(false)
+                        .with_size(density::TABLE_ROW_HEIGHT),
+                ),
             )
     }
 }
@@ -286,5 +302,16 @@ mod tests {
     fn a_single_scope_labels_itself_with_the_references_short_name() {
         let reference = Reference::LocalBranch(BranchName::new("chantier/m1").unwrap());
         assert_eq!(scope_label(&HistoryScope::Single(reference)), "chantier/m1");
+    }
+
+    #[test]
+    fn a_double_click_event_carries_the_double_clicked_commits_id() {
+        let id: ObjectId = "1".repeat(40).parse().unwrap();
+        let event = HistoryPanelEvent::DoubleClicked(id);
+
+        let HistoryPanelEvent::DoubleClicked(carried) = event else {
+            panic!("expected HistoryPanelEvent::DoubleClicked");
+        };
+        assert_eq!(carried, id);
     }
 }
