@@ -1,11 +1,12 @@
-//! Saving and restoring the dock layout across launches.
+//! Saving and restoring window preferences across launches: the dock layout and the
+//! theme preference.
 //!
-//! [`DockAreaState`] is `Serialize`/`Deserialize` and carries no gpui entities, so the
-//! round trip through this module is ordinary JSON on disk — no different in kind from
-//! any other config file. Saving is meant to run on `cx.background_executor()`, debounced
-//! by [`crate::workspace::Workspace`]: `DockEvent::LayoutChanged` fires on every drag
-//! frame while a panel is being resized, and writing a file on every one of those would
-//! make resizing stutter.
+//! [`DockAreaState`] and [`ThemePreference`] are both `Serialize`/`Deserialize` and carry
+//! no gpui entities, so the round trip through this module is ordinary JSON on disk — no
+//! different in kind from any other config file. Dock layout saves are debounced by
+//! [`crate::workspace::Workspace`], since `DockEvent::LayoutChanged` fires on every drag
+//! frame while a panel is being resized; a theme preference change is a rare, deliberate
+//! click, so it saves immediately.
 //!
 //! A failure here is a logged inconvenience, not a crash: nothing in this module panics,
 //! and every fallible function returns a `Result` for the caller to log and move past.
@@ -14,8 +15,11 @@ use std::path::{Path, PathBuf};
 
 use gpui_component::dock::DockAreaState;
 
+use crate::theme_preference::ThemePreference;
+
 const APPLICATION_SUPPORT_DIR: &str = "Library/Application Support/gitr";
 const DOCK_LAYOUT_FILE: &str = "dock-layout.json";
+const THEME_PREFERENCE_FILE: &str = "theme-preference.json";
 
 /// Where the dock layout lives for the signed-in user, or `None` if `$HOME` is unset.
 ///
@@ -62,6 +66,47 @@ pub fn save(state: &DockAreaState) -> anyhow::Result<()> {
 /// older version — is treated the same way: fall back to the default layout.
 pub fn load() -> Option<DockAreaState> {
     load_from(&dock_layout_path()?).ok()
+}
+
+/// Where the theme preference lives for the signed-in user, or `None` if `$HOME` is
+/// unset. See [`dock_layout_path`] — same directory, same not-cached reasoning.
+pub fn theme_preference_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join(APPLICATION_SUPPORT_DIR)
+            .join(THEME_PREFERENCE_FILE),
+    )
+}
+
+/// Persists `preference` to `path`, creating its parent directory if it does not exist
+/// yet. Blocking: call this from `cx.background_executor()`, never on the frame thread.
+pub fn save_theme_preference_to(path: &Path, preference: &ThemePreference) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string_pretty(preference)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+/// Reads and parses the theme preference at `path`. Blocking, meant to run once at
+/// startup before the first frame — same shape as [`load_from`].
+pub fn load_theme_preference_from(path: &Path) -> anyhow::Result<ThemePreference> {
+    let json = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&json)?)
+}
+
+/// Saves `preference` to the user's application support directory.
+pub fn save_theme_preference(preference: &ThemePreference) -> anyhow::Result<()> {
+    let path = theme_preference_path().ok_or_else(|| anyhow::anyhow!("$HOME is not set"))?;
+    save_theme_preference_to(&path, preference)
+}
+
+/// Loads the theme preference from the user's application support directory, if one
+/// exists and parses cleanly. Any failure falls back to `None`, mirroring [`load`].
+pub fn load_theme_preference() -> Option<ThemePreference> {
+    load_theme_preference_from(&theme_preference_path()?).ok()
 }
 
 #[cfg(test)]
@@ -126,6 +171,61 @@ mod tests {
         let state = sample_state();
 
         save_to(&path, &state).expect("save must create its own parent directory");
+        assert!(path.exists());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn round_trips_a_theme_preference_through_disk() {
+        let path = scratch_path("theme-round-trip.json");
+
+        save_theme_preference_to(&path, &ThemePreference::Dark)
+            .expect("save must succeed against a writable temp path");
+        let loaded = load_theme_preference_from(&path).expect("load must succeed right after save");
+
+        assert_eq!(loaded, ThemePreference::Dark);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_missing_theme_preference_file_is_an_error_not_a_panic() {
+        let path = scratch_path("theme-does-not-exist.json");
+        assert!(load_theme_preference_from(&path).is_err());
+    }
+
+    #[test]
+    fn a_corrupt_theme_preference_file_is_an_error_not_a_panic() {
+        let path = scratch_path("theme-corrupt.json");
+        std::fs::write(&path, b"not json").expect("must be able to write the scratch file");
+
+        assert!(load_theme_preference_from(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_missing_theme_preference_file_falls_back_to_the_default_preference() {
+        let path = scratch_path("theme-default-fallback-missing.json");
+        let preference = load_theme_preference_from(&path).unwrap_or_default();
+        assert_eq!(preference, ThemePreference::default());
+    }
+
+    #[test]
+    fn a_corrupt_theme_preference_file_falls_back_to_the_default_preference() {
+        let path = scratch_path("theme-default-fallback-corrupt.json");
+        std::fs::write(&path, b"{ not json").expect("must be able to write the scratch file");
+
+        let preference = load_theme_preference_from(&path).unwrap_or_default();
+        assert_eq!(preference, ThemePreference::default());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn saving_a_theme_preference_creates_missing_parent_directories() {
+        let path = scratch_path("theme-nested-dir").join("theme-preference.json");
+
+        save_theme_preference_to(&path, &ThemePreference::Light)
+            .expect("save must create its own parent directory");
         assert!(path.exists());
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

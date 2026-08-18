@@ -19,6 +19,7 @@ pub mod persistence;
 pub mod repository;
 pub mod sidebar;
 mod theme_palette;
+pub mod theme_preference;
 pub mod workspace;
 
 pub use workspace::Workspace;

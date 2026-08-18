@@ -1,7 +1,7 @@
 //! Root view of a gitr window: title bar, sidebar, centre/right dock and status bar.
 //!
 //! ```text
-//! ┌─ TitleBar : gitr — <repo> · <branch> ────────────────────────────────────┐
+//! ┌─ TitleBar : gitr — <repo> · <branch> ───────────────────── [theme ▾] ────┐
 //! ├───────────────┬───────────────────────────────────────┬────────────────┤
 //! │ [repo ▾]      │ centre dock: HistoryPanel              │ right dock:    │
 //! │ ▸ Working     │                                        │ DetailPanel    │
@@ -10,7 +10,7 @@
 //! │ ▸ Tags        │                                        │                │
 //! │ ▸ Stashes     │                                        │                │
 //! ├───────────────┴───────────────────────────────────────┴────────────────┤
-//! │ StatusBar : N commits · theme toggle                                     │
+//! │ StatusBar : N commits                                                    │
 //! └───────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -29,14 +29,16 @@ use std::time::Duration;
 
 use domain::{HeadState, HistoryScope, Reference};
 use gpui::{
-    App, AppContext as _, Context, Edges, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Subscription, Task, Window, div, px,
+    Animation, AnimationExt as _, App, AppContext as _, Context, Edges, Entity, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Subscription,
+    Task, WeakEntity, Window, div, ease_in_out, px,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Root, Sizable as _, Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dock::{DockArea, DockAreaState, DockEvent, DockItem, Panel},
     h_flex,
+    menu::{DropdownMenu as _, PopupMenuItem},
     notification::NotificationType,
     status_bar::StatusBar,
 };
@@ -47,6 +49,7 @@ use crate::{
     persistence,
     repository::{History, HistoryFilter, LoadState, RepositoryEvent, RepositoryState},
     sidebar,
+    theme_preference::ThemePreference,
 };
 
 const DOCK_AREA_ID: &str = "gitr-dock";
@@ -67,6 +70,22 @@ const DETAIL_DOCK_WIDTH: f32 = 480.;
 
 const SAVE_DEBOUNCE: Duration = Duration::from_secs(10);
 
+/// How long the cross-fade in [`theme_transition_overlay`] takes to reveal the new theme.
+/// Within the 150–250ms window a mode switch reads as instantaneous but not jarring.
+const THEME_TRANSITION_DURATION: Duration = Duration::from_millis(200);
+
+/// A theme cross-fade in progress: the overlay paints in the theme being left, on top of
+/// the new theme already painted underneath, and fades out.
+///
+/// `id` must change on every transition. [`gpui::AnimationExt::with_animation`] keys an
+/// animation's start time to its element id, so reusing one across transitions would
+/// either replay a stale, already-finished animation on the second switch or not restart
+/// it at all.
+struct ThemeTransition {
+    id: usize,
+    from_background: Hsla,
+}
+
 /// Root view of a gitr window.
 pub struct Workspace {
     dock_area: Entity<DockArea>,
@@ -74,7 +93,9 @@ pub struct Workspace {
     history_panel: Entity<HistoryPanel>,
     detail_panel: Entity<DetailPanel>,
     sidebar_collapsed: bool,
-    follow_system_theme: bool,
+    theme_preference: ThemePreference,
+    theme_transition: Option<ThemeTransition>,
+    next_theme_transition_id: usize,
     last_saved_layout: Option<DockAreaState>,
     _save_layout_task: Option<Task<()>>,
     _appearance_subscription: Subscription,
@@ -85,11 +106,12 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Theme::sync_system_appearance(Some(window), cx);
+        let theme_preference = theme_preference_at_startup();
+        apply_theme_preference(theme_preference, window, cx);
 
         let entity = cx.entity();
         let appearance_subscription = window.observe_window_appearance(move |window, cx| {
-            if entity.read(cx).follow_system_theme {
+            if entity.read(cx).theme_preference.follows_system() {
                 Theme::sync_system_appearance(Some(window), cx);
             }
         });
@@ -158,7 +180,9 @@ impl Workspace {
             history_panel,
             detail_panel,
             sidebar_collapsed: false,
-            follow_system_theme: true,
+            theme_preference,
+            theme_transition: None,
+            next_theme_transition_id: 0,
             last_saved_layout: None,
             _save_layout_task: None,
             _appearance_subscription: appearance_subscription,
@@ -166,6 +190,67 @@ impl Workspace {
             _repository_subscription: repository_subscription,
             _history_panel_subscription: history_panel_subscription,
         }
+    }
+
+    /// Applies `preference`, persists it, and — when it changes which mode is actually
+    /// on screen — starts a cross-fade from the mode being left. The comparison against
+    /// `cx.theme().mode` happens before either is touched, so picking `System` while the
+    /// OS is already in the mode already showing is a no-op that never flashes the
+    /// overlay, and so does re-picking the preference already in effect.
+    fn set_theme_preference(
+        &mut self,
+        preference: ThemePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if preference == self.theme_preference {
+            return;
+        }
+
+        let target_mode = preference
+            .explicit_mode()
+            .unwrap_or_else(|| ThemeMode::from(window.appearance()));
+
+        if target_mode != cx.theme().mode {
+            self.next_theme_transition_id += 1;
+            let transition = ThemeTransition {
+                id: self.next_theme_transition_id,
+                from_background: cx.theme().background,
+            };
+            self.theme_transition = Some(transition);
+
+            let transition_id = self.next_theme_transition_id;
+            cx.spawn_in(window, async move |workspace, window| {
+                window
+                    .background_executor()
+                    .timer(THEME_TRANSITION_DURATION)
+                    .await;
+                let _ = workspace.update_in(window, move |workspace, _, cx| {
+                    let is_current = workspace
+                        .theme_transition
+                        .as_ref()
+                        .is_some_and(|transition| transition.id == transition_id);
+                    if is_current {
+                        workspace.theme_transition = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+
+        self.theme_preference = preference;
+        apply_theme_preference(preference, window, cx);
+
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = persistence::save_theme_preference(&preference) {
+                    eprintln!("gitr: failed to save theme preference: {error:#}");
+                }
+            })
+            .detach();
+
+        cx.notify();
     }
 
     /// Scopes the history to `reference` and pushes it both to [`RepositoryState`], which
@@ -258,6 +343,34 @@ impl Workspace {
     }
 }
 
+/// Reads the persisted theme preference, logging and defaulting on a genuine failure to
+/// parse an existing file. A file that is simply absent — every first launch — is not
+/// logged: that is the expected, unremarkable case, exactly as for the dock layout in
+/// [`persistence::load`].
+fn theme_preference_at_startup() -> ThemePreference {
+    let Some(path) = persistence::theme_preference_path() else {
+        return ThemePreference::default();
+    };
+    if !path.exists() {
+        return ThemePreference::default();
+    }
+    persistence::load_theme_preference_from(&path).unwrap_or_else(|error| {
+        eprintln!("gitr: failed to read saved theme preference, using the default: {error:#}");
+        ThemePreference::default()
+    })
+}
+
+/// Applies `preference` to the window: an explicit choice pins [`Theme::change`] to it,
+/// `System` hands off to [`Theme::sync_system_appearance`] so it reads the OS appearance
+/// itself. Shared between the initial launch and every later [`Workspace::set_theme_preference`]
+/// call so the two can never disagree on how a preference becomes an applied mode.
+fn apply_theme_preference(preference: ThemePreference, window: &mut Window, cx: &mut App) {
+    match preference.explicit_mode() {
+        Some(mode) => Theme::change(mode, Some(window), cx),
+        None => Theme::sync_system_appearance(Some(window), cx),
+    }
+}
+
 /// Builds the default centre/right layout — a [`HistoryPanel`] tab in the centre and a
 /// [`DetailPanel`] tab in the right dock — and hands both back so [`Workspace`] always
 /// has a handle to push repository state into, whether this ran because no layout was
@@ -328,6 +441,7 @@ fn title_bar(
     repository_name: &str,
     head: &LoadState<HeadState>,
     sidebar_collapsed: bool,
+    theme_preference: ThemePreference,
     cx: &mut Context<Workspace>,
 ) -> TitleBar {
     let branch = match head {
@@ -340,61 +454,100 @@ fn title_bar(
     };
     let title = format!("gitr — {repository_name} · {branch}");
 
-    TitleBar::new().child(
-        h_flex()
-            .items_center()
-            .gap_2()
-            .child(
-                Button::new("toggle-sidebar")
-                    .ghost()
-                    .xsmall()
-                    .icon(if sidebar_collapsed {
-                        IconName::PanelLeftOpen
-                    } else {
-                        IconName::PanelLeftClose
-                    })
-                    .tooltip("Toggle Sidebar")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar_collapsed = !this.sidebar_collapsed;
-                        cx.notify();
-                    })),
-            )
-            .child(div().text_sm().child(title)),
-    )
+    TitleBar::new()
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new("toggle-sidebar")
+                        .ghost()
+                        .xsmall()
+                        .icon(if sidebar_collapsed {
+                            IconName::PanelLeftOpen
+                        } else {
+                            IconName::PanelLeftClose
+                        })
+                        .tooltip("Toggle Sidebar")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.sidebar_collapsed = !this.sidebar_collapsed;
+                            cx.notify();
+                        })),
+                )
+                .child(div().text_sm().child(title)),
+        )
+        .child(theme_preference_control(theme_preference, cx))
 }
 
-fn status_bar(history: &LoadState<Arc<History>>, cx: &mut Context<Workspace>) -> StatusBar {
-    let is_dark = cx.theme().is_dark();
+/// The title bar's theme control: a button whose icon is the active preference's own
+/// (readable at a glance without opening anything) that opens a three-entry menu with a
+/// check on the active one.
+///
+/// A menu was chosen over a button that cycles through the three states: with three
+/// states, a cycle can need two clicks to reach the one not adjacent to the current
+/// state, and gives no visibility into what the other choices even are. A menu reaches
+/// any of the three in one click and shows all three labelled, which matters more for a
+/// setting that is touched rarely and half-remembered between visits than a tight click
+/// count would.
+fn theme_preference_control(
+    preference: ThemePreference,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let workspace = cx.entity().downgrade();
+
+    Button::new("theme-preference")
+        .ghost()
+        .xsmall()
+        .icon(preference.icon())
+        .tooltip(format!("Theme: {}", preference.label()))
+        .dropdown_menu(move |menu, _, _| {
+            ThemePreference::ALL.iter().fold(menu, |menu, &option| {
+                menu.item(theme_preference_menu_item(&workspace, option, preference))
+            })
+        })
+}
+
+fn theme_preference_menu_item(
+    workspace: &WeakEntity<Workspace>,
+    option: ThemePreference,
+    current: ThemePreference,
+) -> PopupMenuItem {
+    let workspace = workspace.clone();
+    PopupMenuItem::new(option.label())
+        .icon(option.icon())
+        .checked(option == current)
+        .on_click(move |_, _window, cx| {
+            let _ = workspace.update_in(cx, move |workspace, window, cx| {
+                workspace.set_theme_preference(option, window, cx);
+            });
+        })
+}
+
+fn status_bar(history: &LoadState<Arc<History>>) -> StatusBar {
     let commit_count = match history {
         LoadState::Ready(history) => format!("{} commits", history.len()),
         LoadState::Idle | LoadState::Loading => "Loading…".to_string(),
         LoadState::Failed(_) => "History unavailable".to_string(),
     };
 
-    StatusBar::new().left(commit_count).right(
-        Button::new("toggle-theme")
-            .ghost()
-            .xsmall()
-            .icon(if is_dark {
-                IconName::Sun
-            } else {
-                IconName::Moon
-            })
-            .tooltip(if is_dark {
-                "Switch to light theme"
-            } else {
-                "Switch to dark theme"
-            })
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.follow_system_theme = false;
-                let next = if cx.theme().is_dark() {
-                    ThemeMode::Light
-                } else {
-                    ThemeMode::Dark
-                };
-                Theme::change(next, Some(window), cx);
-            })),
-    )
+    StatusBar::new().left(commit_count)
+}
+
+/// Paints over the window in the theme being left and fades that cover away, so the new
+/// theme — already painted underneath — reads as a cross-fade. This fades a single flat
+/// background, not every themed element independently; a full interpolation would need
+/// to animate each token on every element rather than one overlay, which is a
+/// deliberately simpler effect than a true theme morph.
+fn theme_transition_overlay(transition: &ThemeTransition) -> impl IntoElement {
+    div()
+        .absolute()
+        .inset_0()
+        .bg(transition.from_background)
+        .with_animation(
+            ("theme-transition", transition.id),
+            Animation::new(THEME_TRANSITION_DURATION).with_easing(ease_in_out),
+            |overlay, delta| overlay.opacity(1.0 - delta),
+        )
 }
 
 impl Render for Workspace {
@@ -418,7 +571,13 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .child(title_bar(&repository_name, &head, sidebar_collapsed, cx))
+            .child(title_bar(
+                &repository_name,
+                &head,
+                sidebar_collapsed,
+                self.theme_preference,
+                cx,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -434,7 +593,8 @@ impl Render for Workspace {
                     ))
                     .child(div().flex_1().min_w_0().child(dock_area)),
             )
-            .child(status_bar(&history, cx))
+            .child(status_bar(&history))
+            .children(self.theme_transition.as_ref().map(theme_transition_overlay))
             .children(sheet_layer)
             .children(dialog_layer)
             .children(notification_layer)
