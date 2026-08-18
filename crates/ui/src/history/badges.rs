@@ -81,6 +81,25 @@ mod tests {
         assert_all_distinct(&ThemeColor::dark());
     }
 
+    #[test]
+    fn every_kind_is_distinguishable_under_github_light() {
+        assert_all_distinct(&crate::theme_palette::resolve_for_tests(
+            crate::theme_palette::LIGHT_THEME_NAME,
+        ));
+    }
+
+    #[test]
+    fn every_kind_is_distinguishable_under_catppuccin_frappe() {
+        assert_all_distinct(&crate::theme_palette::resolve_for_tests(
+            crate::theme_palette::DARK_THEME_NAME,
+        ));
+    }
+
+    /// Same threshold and reasoning as `graph_palette`'s: raw `Hsla` inequality does not
+    /// catch a badge colour that composites to nearly the background or to another
+    /// badge's colour, only compositing first does.
+    const MIN_DISTINGUISHABLE: f32 = 0.06;
+
     fn assert_all_distinct(theme: &ThemeColor) {
         let colors = [
             badge_color(BadgeKind::LocalBranch, theme),
@@ -89,7 +108,11 @@ mod tests {
         ];
         for (i, a) in colors.iter().enumerate() {
             for (j, b) in colors.iter().enumerate().skip(i + 1) {
-                assert_ne!(a, b, "badge kinds {i} and {j} must be distinguishable");
+                let distance = crate::theme_palette::rendered_distance(theme.background, *a, *b);
+                assert!(
+                    distance > MIN_DISTINGUISHABLE,
+                    "badge kinds {i} and {j} read as the same colour once painted (distance {distance:.3})"
+                );
             }
         }
     }

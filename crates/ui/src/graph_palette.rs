@@ -14,6 +14,15 @@ type Swatch = fn(&ThemeColor) -> Hsla;
 /// Eight hues, alternating a full-strength and a light variant so two lanes that land
 /// [`PALETTE_SIZE`] apart — the only way this mapping can repeat a colour — are never
 /// adjacent in a real layout without many more concurrent lanes than a readable graph has.
+///
+/// The eighth entry reads `yellow_light`, not `magenta_light`. Under Catppuccin, a theme
+/// sets `magenta_light` to the same hue as `magenta` at reduced alpha rather than a
+/// distinct tint — under Frappé the two resolve to identical RGB, differing only in
+/// opacity, which a 1-2px lane stroke cannot read as two colours. `yellow_light` has no
+/// such override in either theme this crate applies (`theme_palette`), so it falls back
+/// to gpui-component's own background-blended tint like `blue_light` does, keeping every
+/// entry a genuinely distinct hue under both Catppuccin Latte and Frappé (see this
+/// file's own tests below for the resolved values this was checked against).
 const PALETTE: [Swatch; PALETTE_SIZE as usize] = [
     |theme| theme.blue,
     |theme| theme.green,
@@ -22,7 +31,7 @@ const PALETTE: [Swatch; PALETTE_SIZE as usize] = [
     |theme| theme.cyan,
     |theme| theme.red,
     |theme| theme.blue_light,
-    |theme| theme.magenta_light,
+    |theme| theme.yellow_light,
 ];
 
 /// The theme colour a renderer should paint lane `color` with.
@@ -47,6 +56,29 @@ mod tests {
         assert_all_distinct(&ThemeColor::dark());
     }
 
+    #[test]
+    fn every_entry_is_distinguishable_under_github_light() {
+        assert_all_distinct(&crate::theme_palette::resolve_for_tests(
+            crate::theme_palette::LIGHT_THEME_NAME,
+        ));
+    }
+
+    #[test]
+    fn every_entry_is_distinguishable_under_catppuccin_frappe() {
+        assert_all_distinct(&crate::theme_palette::resolve_for_tests(
+            crate::theme_palette::DARK_THEME_NAME,
+        ));
+    }
+
+    /// Minimum Euclidean RGB distance (normalised `[0, 1]` per channel, so the maximum
+    /// possible is `3.0_f32.sqrt()`) two lane colours must clear once composited over the
+    /// background. Set below the closest pair either applied theme produces today — blue
+    /// next to magenta, ~0.17 under Catppuccin Frappé, both being violet-leaning hues in
+    /// Catppuccin's own palette — and above the collision this test was written to catch,
+    /// where `magenta_light` collapsed onto `magenta` at ~0.0-0.07 (see the `PALETTE` doc
+    /// comment).
+    const MIN_DISTINGUISHABLE: f32 = 0.06;
+
     fn assert_all_distinct(theme: &ThemeColor) {
         let colors: Vec<Hsla> = (0..PALETTE_SIZE)
             .map(|index| lane_color(LaneColor(index), theme))
@@ -54,8 +86,18 @@ mod tests {
 
         for (i, a) in colors.iter().enumerate() {
             for (j, b) in colors.iter().enumerate().skip(i + 1) {
-                assert_ne!(a, b, "lane colors {i} and {j} must be distinguishable");
+                let distance = crate::theme_palette::rendered_distance(theme.background, *a, *b);
+                assert!(
+                    distance > MIN_DISTINGUISHABLE,
+                    "lane colors {i} and {j} read as the same colour once painted (distance {distance:.3})"
+                );
             }
+            let distance =
+                crate::theme_palette::rendered_distance(theme.background, *a, theme.background);
+            assert!(
+                distance > MIN_DISTINGUISHABLE,
+                "lane color {i} is indistinguishable from the background (distance {distance:.3})"
+            );
         }
     }
 
