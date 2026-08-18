@@ -5,6 +5,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::mpsc;
 
 use tempfile::TempDir;
 use vcs::process::{GitRunner, RemoteError};
@@ -194,4 +195,92 @@ fn fetch_brings_new_tags_and_prunes_deleted_ones() {
 
     assert_eq!(git(&destination, &["for-each-ref", "refs/tags/v1.0"]), "");
     assert!(!git(&destination, &["for-each-ref", "refs/tags/v2.0"]).is_empty());
+}
+
+/// A clone against a local source is expected to emit little to no progress — `git`'s
+/// local transport does not stream the same phased output a network clone does — so this
+/// only proves the progress-reporting entry point clones correctly and closes its channel
+/// cleanly, not that it delivers a rich update sequence; `clone_progress`'s own unit tests
+/// (`crates/vcs/src/process/clone_progress.rs`) exercise that against bytes captured from
+/// a real network clone instead.
+#[test]
+fn clone_bare_with_progress_produces_the_same_commits_as_clone_bare() {
+    let source = init_repository();
+    commit(source.path(), "first");
+    let second = commit(source.path(), "second");
+    let workspace = tempfile::tempdir().unwrap();
+    let destination = workspace.path().join("dest.git");
+    let (sender, _receiver) = mpsc::channel();
+
+    GitRunner::new()
+        .clone_bare_with_progress(&source.path().to_string_lossy(), &destination, sender)
+        .unwrap();
+
+    assert!(destination.join("HEAD").is_file());
+    assert_eq!(head_of(&destination, "HEAD"), second);
+}
+
+#[test]
+fn clone_bare_with_progress_refuses_to_overwrite_an_existing_destination() {
+    let source = init_repository();
+    commit(source.path(), "first");
+    let workspace = tempfile::tempdir().unwrap();
+    let destination = workspace.path().join("dest.git");
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(destination.join("marker"), b"pre-existing").unwrap();
+    let (sender, _receiver) = mpsc::channel();
+
+    let error = GitRunner::new()
+        .clone_bare_with_progress(&source.path().to_string_lossy(), &destination, sender)
+        .unwrap_err();
+
+    match error {
+        RemoteError::DestinationExists(path) => assert_eq!(path, destination),
+        other => panic!("expected DestinationExists, got {other:?}"),
+    }
+    assert!(destination.join("marker").is_file());
+}
+
+#[test]
+fn clone_bare_with_progress_on_a_nonexistent_source_fails_as_not_found_and_leaves_nothing_behind() {
+    let workspace = tempfile::tempdir().unwrap();
+    let destination = workspace.path().join("dest.git");
+    let (sender, _receiver) = mpsc::channel();
+
+    let error = GitRunner::new()
+        .clone_bare_with_progress(
+            "/definitely/not/a/real/source/path/xyz",
+            &destination,
+            sender,
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(error, RemoteError::NotFound { .. }),
+        "expected NotFound, got {error:?}"
+    );
+    assert!(!destination.exists());
+    let partial = workspace.path().join("dest.git.gitr-partial");
+    assert!(!partial.exists());
+}
+
+/// The UI's clone-progress watcher (`crates/ui/src/workspace.rs`) knows a clone has
+/// finished purely by the progress channel disconnecting — it never inspects the clone's
+/// `Result` directly, since that arrives through a separate task. That only works if the
+/// `Sender` this method is handed is dropped by the time the call returns, on every
+/// outcome; this proves it for the success path by observing the paired `Receiver`
+/// disconnect immediately afterward.
+#[test]
+fn clone_bare_with_progress_drops_the_sender_before_returning() {
+    let source = init_repository();
+    commit(source.path(), "first");
+    let workspace = tempfile::tempdir().unwrap();
+    let destination = workspace.path().join("dest.git");
+    let (sender, receiver) = mpsc::channel();
+
+    GitRunner::new()
+        .clone_bare_with_progress(&source.path().to_string_lossy(), &destination, sender)
+        .unwrap();
+
+    assert!(matches!(receiver.recv(), Err(mpsc::RecvError)));
 }

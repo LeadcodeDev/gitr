@@ -97,6 +97,50 @@ fn runner_maps_a_failing_invocation_to_the_real_stderr() {
 }
 
 #[test]
+fn run_with_stderr_chunks_delivers_the_same_stderr_run_would_have_buffered() {
+    let repository = init_repository();
+
+    let runner = GitRunner::new();
+    let mut collected = Vec::new();
+    let output = runner
+        .run_with_stderr_chunks(
+            repository.path(),
+            &["show", "not-a-valid-revision"],
+            |chunk| collected.extend_from_slice(chunk),
+        )
+        .unwrap_err();
+
+    match output {
+        GitProcessError::Failed { stderr, .. } => {
+            assert!(!stderr.is_empty());
+            assert_eq!(String::from_utf8(collected).unwrap(), stderr);
+        }
+        GitProcessError::Spawn(source) => {
+            panic!("expected a command failure, got spawn error: {source}")
+        }
+    }
+}
+
+#[test]
+fn run_with_stderr_chunks_still_reports_stdout_and_success_for_a_clean_run() {
+    let repository = init_repository();
+    std::fs::write(repository.path().join("a.txt"), "hello\n").unwrap();
+    git(repository.path(), &["add", "a.txt"]);
+    commit_at(repository.path(), "2020-01-01T00:00:00", "first");
+
+    let runner = GitRunner::new();
+    let output = runner
+        .run_with_stderr_chunks(
+            repository.path(),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            |_| {},
+        )
+        .unwrap();
+
+    assert_eq!(output.stdout.trim(), head_id(repository.path()).to_string());
+}
+
+#[test]
 fn commit_patch_returns_the_expected_patch_for_a_known_commit() {
     let repository = init_repository();
     std::fs::write(repository.path().join("a.txt"), "line1\n").unwrap();

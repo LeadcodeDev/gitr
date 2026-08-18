@@ -31,7 +31,9 @@
 //! downstream reads a repository itself.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use domain::{Aspect, HeadState, HistoryScope, Reference, RepositoryChange};
@@ -50,7 +52,7 @@ use gpui_component::{
     notification::NotificationType,
     status_bar::StatusBar,
 };
-use vcs::process::GitRunner;
+use vcs::process::{CloneProgress, GitRunner};
 
 use crate::{
     detail::DetailPanel,
@@ -61,7 +63,7 @@ use crate::{
         resolve_repository_root, validate_remote_url,
     },
     repository::{History, HistoryFilter, LoadState, RepositoryEvent, RepositoryState},
-    sidebar,
+    sidebar::{self, selector::CloningStatus},
     theme_preference::ThemePreference,
 };
 
@@ -112,6 +114,51 @@ struct ThemeTransition {
     from_background: Hsla,
 }
 
+/// The clone [`Workspace::add_project_from_url`] currently has running.
+///
+/// `progress` starts `None` and is filled in by [`Workspace::start_clone_progress_watch`]
+/// as `vcs` reports phases — a clone can be seconds into a slow "Enumerating objects"
+/// count with nothing yet to show, and the row renders that absence rather than a stale
+/// or fabricated percentage.
+struct CloningProject {
+    url: String,
+    progress: Option<CloneProgress>,
+}
+
+/// How often [`Workspace::start_clone_progress_watch`]'s polling task looks for a clone
+/// progress update the background pump thread has parked for it.
+///
+/// A `gpui` timer, never a blocking receive — the same reasoning
+/// `crates/ui/src/repository/state.rs`'s `WATCH_POLL_INTERVAL` documents: a blocking
+/// `recv` on this executor would hold the frame thread hostage for the interval's length,
+/// repeatedly, for as long as the clone runs.
+const CLONE_PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Default)]
+struct CloneProgressMailbox {
+    latest: Option<CloneProgress>,
+    disconnected: bool,
+}
+
+/// Blocks on `receiver` for the life of the clone, on a thread of its own — see
+/// [`CLONE_PROGRESS_POLL_INTERVAL`] for why nothing on `gpui`'s executor may do this
+/// itself. Ends when `receiver`'s sender drops, which happens the moment
+/// `vcs::process::GitRunner::clone_bare_with_progress` returns, on every outcome.
+fn pump_clone_progress(
+    receiver: mpsc::Receiver<CloneProgress>,
+    mailbox: Arc<Mutex<CloneProgressMailbox>>,
+) {
+    while let Ok(update) = receiver.recv() {
+        let Ok(mut mailbox) = mailbox.lock() else {
+            return;
+        };
+        mailbox.latest = Some(update);
+    }
+    if let Ok(mut mailbox) = mailbox.lock() {
+        mailbox.disconnected = true;
+    }
+}
+
 /// Root view of a gitr window.
 pub struct Workspace {
     dock_area: Entity<DockArea>,
@@ -141,14 +188,23 @@ pub struct Workspace {
     /// scrolling through a long list does not reset to the top on every keystroke in
     /// [`Self::project_search_input`].
     project_list_scroll: ScrollHandle,
-    /// The URL currently being cloned, if any — `crates/ui/src/sidebar/selector.rs` shows
-    /// this as an in-progress row rather than leaving the selector looking idle while a
-    /// clone (seconds, not milliseconds — see `crates/vcs/src/process/remote.rs`) runs on
+    /// The clone currently in flight, if any — `crates/ui/src/sidebar/selector.rs` shows
+    /// its URL and its most recently reported phase and percentage as an in-progress row,
+    /// rather than leaving the selector looking idle while a clone (seconds, not
+    /// milliseconds — see `crates/vcs/src/process/remote.rs`) runs on
     /// `cx.background_executor()`.
-    cloning_project: Option<String>,
+    cloning_project: Option<CloningProject>,
     /// Whether a `synchronise` fetch for the active project is in flight, so the sidebar
     /// can show that and refuse a second concurrent fetch for the same project.
     synchronising: bool,
+    /// Consumed the next time [`Self::render`] builds the selector: forces
+    /// `gpui_component`'s own popover state closed for that one render — see
+    /// [`sidebar::selector::popover`] — rather than tracking "is the selector open" here
+    /// too. Set wherever a flow the selector started reaches a terminal outcome: a clone
+    /// finishing, a disk import finishing, or a different project becoming active. Never
+    /// set while [`Self::cloning_project`] is still in flight, so the dropdown stays put
+    /// while there is progress left to watch.
+    close_selector: bool,
     _save_layout_task: Option<Task<()>>,
     _appearance_subscription: Subscription,
     _dock_subscription: Subscription,
@@ -271,6 +327,7 @@ impl Workspace {
             project_list_scroll: ScrollHandle::new(),
             cloning_project: None,
             synchronising: false,
+            close_selector: false,
             _save_layout_task: None,
             _appearance_subscription: appearance_subscription,
             _dock_subscription: dock_subscription,
@@ -509,7 +566,13 @@ impl Workspace {
     /// filter reset to their defaults — a scope naming a branch from the old repository
     /// would not resolve against the new one. There is no frame in which the old
     /// project's rows, detail, or filter are still showing under the new project's name.
+    ///
+    /// Also the single place that closes the selector on "a different project is
+    /// activated": every path that switches the live repository — a row click in
+    /// [`Self::switch_to`], reactivating an already-known project, a fresh clone landing —
+    /// runs through here.
     fn open_project(&mut self, project: &Project, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_selector = true;
         let (path, watch) = repository_path_and_watch(&project.source);
 
         let repository = cx.new(|cx| RepositoryState::open(path, watch, cx));
@@ -568,12 +631,18 @@ impl Workspace {
     /// Resolves `path` to a repository root and adds it to the remembered list,
     /// activating it. A path that does not lead to a Git repository is reported through
     /// a notification — never a dialog, never a panic — and the list is left untouched.
+    ///
+    /// Either way this is a disk import finishing, so the selector — open, since "Open
+    /// from Disk…" only reachable from inside it — closes on both outcomes: the
+    /// notification is what tells the user about a failure, not a dropdown left open
+    /// over it.
     fn add_project_from_disk(
         &mut self,
         path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_selector = true;
         let root = match resolve_repository_root(&path) {
             Ok(root) => root,
             Err(error) => {
@@ -619,6 +688,11 @@ impl Workspace {
     /// [`vcs::process::RemoteError`] variant keeps `git`'s own distinguishing message
     /// (not found, authentication required, network unavailable, ...), so the notification
     /// this surfaces on failure never collapses those into one generic message.
+    ///
+    /// Every terminal outcome below closes the selector — a validation error, a missing
+    /// cache directory, a finished clone whichever way it went — except refusing a second
+    /// overlapping clone, which must leave the first one's progress on screen rather than
+    /// hide it.
     pub(crate) fn add_project_from_url(
         &mut self,
         raw_url: String,
@@ -628,12 +702,14 @@ impl Workspace {
         let url = match validate_remote_url(&raw_url) {
             Ok(url) => url,
             Err(error) => {
+                self.close_selector = true;
                 window.push_notification((NotificationType::Error, error.to_string()), cx);
                 return;
             }
         };
 
         let Some(cache_root) = persistence::remote_cache_root() else {
+            self.close_selector = true;
             window.push_notification(
                 (
                     NotificationType::Error,
@@ -672,19 +748,32 @@ impl Workspace {
             return;
         }
 
-        self.cloning_project = Some(url.clone());
+        self.cloning_project = Some(CloningProject {
+            url: url.clone(),
+            progress: None,
+        });
         cx.notify();
+
+        let (progress_sender, progress_receiver) = mpsc::channel::<CloneProgress>();
+        self.start_clone_progress_watch(progress_receiver, window, cx);
 
         cx.spawn_in(window, async move |workspace, window| {
             let clone_url = url.clone();
             let clone_destination = cache_dir.clone();
             let result = window
                 .background_executor()
-                .spawn(async move { GitRunner::new().clone_bare(&clone_url, &clone_destination) })
+                .spawn(async move {
+                    GitRunner::new().clone_bare_with_progress(
+                        &clone_url,
+                        &clone_destination,
+                        progress_sender,
+                    )
+                })
                 .await;
 
             let _ = workspace.update_in(window, move |workspace, window, cx| {
                 workspace.cloning_project = None;
+                workspace.close_selector = true;
                 match result {
                     Ok(()) => {
                         let project = Project::remote(url.clone(), cache_dir.clone());
@@ -702,6 +791,60 @@ impl Workspace {
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Shows each [`CloneProgress`] update a running clone reports, as it arrives.
+    ///
+    /// `receiver` is read on a dedicated OS thread — a plain [`std::sync::mpsc::Receiver`]
+    /// blocks on `recv`, and nothing on `gpui`'s executor may block, exactly the
+    /// constraint `crates/ui/src/repository/state.rs`'s filesystem watcher is built
+    /// around, whose mailbox-plus-timer shape this reuses rather than inventing a second
+    /// one. That thread parks the latest update in a `Mutex`-guarded mailbox; this task
+    /// only ever awaits a timer and drains it. The task ends on its own once the mailbox
+    /// reports the sender dropped — which is exactly when the clone this progress
+    /// belongs to has returned — so nothing here needs to be told when to stop.
+    fn start_clone_progress_watch(
+        &mut self,
+        receiver: mpsc::Receiver<CloneProgress>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |workspace, window| {
+            let mailbox = Arc::new(Mutex::new(CloneProgressMailbox::default()));
+            thread::spawn({
+                let mailbox = Arc::clone(&mailbox);
+                move || pump_clone_progress(receiver, mailbox)
+            });
+
+            loop {
+                window
+                    .background_executor()
+                    .timer(CLONE_PROGRESS_POLL_INTERVAL)
+                    .await;
+
+                let collected = match mailbox.lock() {
+                    Ok(mut mailbox) => (mailbox.latest.take(), mailbox.disconnected),
+                    Err(_) => return,
+                };
+
+                if let Some(progress) = collected.0 {
+                    let updated = workspace.update_in(window, move |workspace, _, cx| {
+                        if let Some(cloning) = workspace.cloning_project.as_mut() {
+                            cloning.progress = Some(progress);
+                        }
+                        cx.notify();
+                    });
+                    if updated.is_err() {
+                        return;
+                    }
+                }
+
+                if collected.1 {
+                    return;
+                }
+            }
         })
         .detach();
     }
@@ -1165,6 +1308,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar_collapsed = self.sidebar_collapsed;
         let dock_area = self.dock_area.clone();
+        let close_selector = std::mem::take(&mut self.close_selector);
 
         let path = self.repository.read(cx).path().to_path_buf();
         let head = self.repository.read(cx).head().clone();
@@ -1180,8 +1324,12 @@ impl Render for Workspace {
             search_input: &self.project_search_input,
             url_input: &self.project_url_input,
             list_scroll: &self.project_list_scroll,
-            cloning: self.cloning_project.as_deref(),
+            cloning: self.cloning_project.as_ref().map(|cloning| CloningStatus {
+                url: &cloning.url,
+                progress: cloning.progress,
+            }),
             synchronising: self.synchronising,
+            close: close_selector,
         };
 
         div()
