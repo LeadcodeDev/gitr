@@ -47,7 +47,33 @@ exist; the `popup_menu` module is not public — it is `gpui_component::menu`. R
 
 **`Root` must be the first child of the window**, or dialogs, sheets and notifications break.
 
-**`theme::init` forces light mode** at startup. Follow the OS appearance explicitly if wanted.
+**`theme::init` forces light mode** at startup. Following the OS appearance needs an explicit
+`window.observe_window_appearance(..)` subscription plus one
+`Theme::sync_system_appearance(Some(window), cx)` at launch.
+
+**Without `.with_assets(gpui_component_assets::Assets)` every icon renders blank**, including
+the window controls `TitleBar` draws. gpui logs and no-ops on a missing asset, so nothing
+fails — the icons are simply invisible. Note the bundled set contains **no VCS icons at all**:
+no branch, tag, remote, stash, commit or diff glyph.
+
+**`TitleBar::window_options()`, not `WindowOptions::default()`.** The title bar draws its own
+chrome and needs the OS one transparent and drag-owned by the app.
+
+**Further API-versus-documentation gaps found the hard way:**
+
+- `Context<T>::on_app_quit` (two arguments) shadows `App::on_app_quit` (one) when called on a
+  `&mut Context<T>`. The inherent method wins.
+- `SidebarHeader::dropdown_menu(..)` returns `DropdownMenuPopover<SidebarHeader>`, not
+  `SidebarHeader`.
+- `SidebarHeader` and `SidebarFooter` do not implement `FluentBuilder`, so there is no
+  `.when(..)` on them, unlike `SidebarMenuItem` and `Div`.
+- `dock::DockState` has private fields despite being `pub` and `Serialize`, and can only be
+  built from a live window. `DockAreaState`, `PanelState` and `PanelInfo` are fully public, so
+  a pure persistence test can only exercise `center`.
+- `ThemeColor::light()` and `ThemeColor::dark()` work outside any `App`, which makes theme
+  mapping unit-testable. `ThemeColor::default()` does not — every field is zeroed.
+- A panel referenced by a saved layout whose name was never passed to `PanelRegistry` falls
+  back silently to `InvalidPanel`. Register panels before loading a layout.
 
 **Never call `TableState::dump`** — it materialises the whole table (gpui-component
 issue #2754). On a large history that is an out-of-memory crash.
@@ -69,6 +95,24 @@ not a git command`.
 **No blocking modal for long operations.** GitX crashes on
 `assert(currentModalSheet == nil)` when two network operations overlap. Long work runs on
 `cx.background_executor()` and reports through the status bar and notifications.
+
+**Canonicalise every path before handing it to `notify`.** FSEvents reports canonical paths,
+and on macOS `/var` is a symlink to `/private/var`. A repository reached through a symlinked
+path makes notify's own filter drop every event, silently, while the watcher still looks
+alive.
+
+**`.git` is a file, not a directory, in a linked worktree and in a submodule.** It holds
+`gitdir: <path>`. Resolve it before watching or reading, or the operation observes nothing
+and reports no error.
+
+**A plain `git commit` does not rewrite `.git/HEAD`.** Only `refs/heads/<branch>` changes;
+`HEAD` keeps the same symbolic-ref text and its mtime does not move. Detecting a commit by
+watching `HEAD` alone misses every commit made on an attached branch.
+
+**`git show` and `git diff-tree -p` print nothing for a merge commit**, and an unknown object
+and a valid root commit produce byte-identical stderr. `crates/vcs/src/process/` diffs a merge
+against its first parent and detects the root commit with two `rev-parse --verify` probes
+rather than by matching git's error text.
 
 ## House rules
 

@@ -10,6 +10,7 @@ pub mod object_id;
 pub mod patch;
 pub mod port;
 pub mod reference;
+pub mod watch;
 
 pub use commit::{Commit, CommitSummary, Parents, Signature, Timestamp};
 pub use error::{PatchError, RepositoryError};
@@ -20,3 +21,4 @@ pub use reference::{
     BranchName, HeadState, InvalidName, RefEntry, Reference, Remote, RemoteName, Stash, Submodule,
     TagName,
 };
+pub use watch::{Aspect, RepositoryChange, RepositoryWatcher, WatchError};
