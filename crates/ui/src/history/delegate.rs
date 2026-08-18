@@ -172,7 +172,7 @@ impl TableDelegate for HistoryTableDelegate {
         match col_ix {
             SHA_COLUMN => sha_cell(commit, &theme),
             GRAPH_COLUMN => match history.layout.rows.get(commit_ix) {
-                Some(row) => graph_cell(row.clone(), self.graph_width, &theme),
+                Some(row) => graph_cell(row.clone(), &theme),
                 None => div().into_any_element(),
             },
             SUBJECT_COLUMN => subject_cell(commit, history.references_at(commit.id), &theme),
@@ -195,13 +195,20 @@ fn sha_cell(commit: &CommitSummary, theme: &ThemeColor) -> AnyElement {
         .into_any_element()
 }
 
-fn graph_cell(row: GraphRow, lane_spacing: Pixels, theme: &ThemeColor) -> AnyElement {
+/// Paints one row's band of the gutter.
+///
+/// Takes no spacing argument on purpose. It once did, and the caller passed the gutter's
+/// total width instead — the two are equal only for a single-lane history, so every
+/// branchier repository silently placed lane 1 beyond the cell and clipped it away, node
+/// and line together. There is exactly one correct value, so the parameter is gone.
+fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
     let theme = *theme;
 
     canvas(
         move |bounds, _, _| bounds,
         move |_, bounds, window, _| {
-            let row_geometry = geometry::row_geometry(&row, bounds.size.height, lane_spacing);
+            let row_geometry =
+                geometry::row_geometry(&row, bounds.size.height, geometry::LANE_SPACING);
 
             for segment in &row_geometry.segments {
                 let top = point(

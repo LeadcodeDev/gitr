@@ -157,3 +157,29 @@ mod tests {
         assert_eq!(geometry.node_center, point(px(8.), px(10.)));
     }
 }
+
+#[cfg(test)]
+mod gutter_fit {
+    use super::*;
+
+    #[test]
+    fn every_lane_a_layout_declares_fits_inside_the_gutter_it_sizes() {
+        for lane_count in 1u16..=32 {
+            let width = gutter_width(lane_count, LANE_SPACING);
+            for lane in 0..lane_count {
+                let center = lane_center_x(Lane(lane), LANE_SPACING);
+                assert!(
+                    center + NODE_RADIUS <= width,
+                    "lane {lane} of {lane_count} centres at {center:?}, past a {width:?} gutter"
+                );
+                assert!(center - NODE_RADIUS >= Pixels::ZERO);
+            }
+        }
+    }
+
+    #[test]
+    fn the_gutter_is_wider_than_one_lane_as_soon_as_there_are_two() {
+        assert!(gutter_width(2, LANE_SPACING) > LANE_SPACING);
+        assert_eq!(gutter_width(2, LANE_SPACING), LANE_SPACING * 2usize);
+    }
+}
