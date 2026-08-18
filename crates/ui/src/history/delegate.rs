@@ -113,6 +113,7 @@ impl TableDelegate for HistoryTableDelegate {
                 .width(self.graph_width)
                 .min_width(self.graph_width)
                 .max_width(self.graph_width)
+                .p_0()
                 .resizable(false)
                 .movable(false)
                 .selectable(false),
