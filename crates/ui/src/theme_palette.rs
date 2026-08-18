@@ -1,10 +1,12 @@
-//! Wires this app's light/dark theme pair: Catppuccin Latte for light, Catppuccin Frappé
-//! for dark, loaded from vendored JSON (provenance and licensing in `themes/NOTICE.md`)
-//! rather than gpui-component's own built-in palette.
+//! Wires this app's light/dark theme pair: Gitr Light (this crate's own warm-neutral
+//! theme) for light, Catppuccin Frappé for dark, loaded from vendored/authored JSON
+//! (provenance and licensing in `themes/NOTICE.md`) rather than gpui-component's own
+//! built-in palette.
 //!
-//! Latte and Frappé are Catppuccin's own light and dark flavours, so following the system
-//! appearance moves between two halves of one designed palette rather than between two
-//! unrelated ones.
+//! The two flavours come from different sources — Gitr Light is authored in this
+//! directory, Frappé is Catppuccin's — so following the system appearance moves between
+//! two independently designed palettes rather than between two halves of one. Dark stays
+//! Catppuccin because only light was ever in scope for the change.
 
 use std::rc::Rc;
 
@@ -12,30 +14,39 @@ use gpui::App;
 use gpui_component::{Theme, ThemeConfig, ThemeRegistry};
 
 const CATPPUCCIN_THEMES: &str = include_str!("../themes/catppuccin.json");
+const GITR_LIGHT_THEME: &str = include_str!("../themes/gitr-light.json");
 
-/// Exact name the vendored file gives the light flavour.
-pub(crate) const LIGHT_THEME_NAME: &str = "Catppuccin Latte";
+/// Exact name [`GITR_LIGHT_THEME`] gives its one theme.
+pub(crate) const LIGHT_THEME_NAME: &str = "Gitr Light";
 
 /// Exact name gpui-component's vendored file gives the dark flavour. Spelled without the
 /// accent — matching this ASCII spelling, not the correct French "Frappé", is what makes
 /// the lookup in [`install`] find the theme instead of silently falling through.
 pub(crate) const DARK_THEME_NAME: &str = "Catppuccin Frappe";
 
-/// Loads the vendored Catppuccin set and makes Latte / Frappé this app's light/dark pair,
-/// replacing gpui-component's own built-in palette for both modes.
+/// Loads both vendored/authored theme sets and makes Gitr Light / Catppuccin Frappé this
+/// app's light/dark pair, replacing gpui-component's own built-in palette for both modes.
 ///
 /// Must run before [`crate::density::apply`]: [`Theme::change`] below re-derives every
 /// legacy colour field from whichever config is active, and is the one call in this path
-/// that could, for some future edit to the JSON file, reintroduce a font size or
+/// that could, for some future edit to either JSON file, reintroduce a font size or
 /// radius override. Running density last makes that class of regression structurally
 /// impossible rather than dependent on the JSON staying as it is today.
 ///
 /// A parse failure or a missing flavour name is logged and left as gpui-component's
 /// built-in theme: a wrong palette is tolerable, a startup panic is not.
 pub fn install(cx: &mut App) {
-    if let Err(error) = ThemeRegistry::global_mut(cx).load_themes_from_str(CATPPUCCIN_THEMES) {
+    let registry = ThemeRegistry::global_mut(cx);
+    if let Err(error) = registry.load_themes_from_str(GITR_LIGHT_THEME) {
         eprintln!(
-            "gitr: the vendored theme set failed to parse, keeping the built-in theme: {error:#}"
+            "gitr: the gitr-light theme failed to parse, keeping the built-in theme: {error:#}"
+        );
+        return;
+    }
+    if let Err(error) = registry.load_themes_from_str(CATPPUCCIN_THEMES) {
+        eprintln!(
+            "gitr: the vendored Catppuccin theme set failed to parse, keeping the built-in \
+             theme: {error:#}"
         );
         return;
     }
@@ -64,15 +75,18 @@ fn resolve(cx: &App) -> Option<(Rc<ThemeConfig>, Rc<ThemeConfig>)> {
     ))
 }
 
-/// Finds `flavour_name` in the vendored JSON, the way [`install`] does through the
-/// registry, but standalone — so tests can check either flavour without an `App`.
+/// Finds `flavour_name` in the vendored/authored JSON, the way [`install`] does through
+/// the registry, but standalone — so tests can check either flavour without an `App`.
 #[cfg(test)]
 fn find_config(flavour_name: &str) -> Option<ThemeConfig> {
-    let set: gpui_component::ThemeSet =
-        serde_json::from_str(CATPPUCCIN_THEMES).expect("vendored theme JSON must parse");
-    set.themes
-        .into_iter()
-        .find(|theme| theme.name == flavour_name)
+    let sources = [GITR_LIGHT_THEME, CATPPUCCIN_THEMES];
+    sources.into_iter().find_map(|source| {
+        let set: gpui_component::ThemeSet =
+            serde_json::from_str(source).expect("theme JSON must parse");
+        set.themes
+            .into_iter()
+            .find(|theme| theme.name == flavour_name)
+    })
 }
 
 /// Resolves `flavour_name`'s colours by applying its config to a fresh [`Theme`] — so
@@ -117,6 +131,12 @@ mod tests {
     }
 
     #[test]
+    fn gitr_light_json_parses() {
+        let _: ThemeSet =
+            serde_json::from_str(GITR_LIGHT_THEME).expect("authored Gitr Light JSON must parse");
+    }
+
+    #[test]
     fn both_followed_flavours_are_present_under_their_exact_names() {
         assert!(find_config(LIGHT_THEME_NAME).is_some());
         assert!(find_config(DARK_THEME_NAME).is_some());
@@ -153,5 +173,63 @@ mod tests {
                 "{name} overrode radius"
             );
         }
+    }
+
+    /// `tree-sitter-diff` paints additions and deletions through the generic `@string`
+    /// and `@keyword` captures rather than dedicated `created`/`deleted` ones (see this
+    /// module's doc comment on [`install`] and the task's own report for how that was
+    /// established), so a legible diff depends on `highlight.syntax.string` and
+    /// `highlight.syntax.keyword` resolving to a green and a red, not on the
+    /// schema-complete but functionally inert top-level `created`/`deleted` keys this
+    /// file also carries.
+    #[test]
+    fn diff_additions_and_deletions_are_distinguishable_syntax_colors() {
+        let config = find_config(LIGHT_THEME_NAME)
+            .unwrap_or_else(|| panic!("{LIGHT_THEME_NAME} missing from the theme sets"));
+        let style = config
+            .highlight
+            .as_ref()
+            .expect("Gitr Light must declare a highlight style");
+
+        let string_style: gpui::HighlightStyle = style
+            .syntax
+            .string
+            .expect("syntax.string must be set so diff additions render in colour")
+            .into();
+        let keyword_style: gpui::HighlightStyle = style
+            .syntax
+            .keyword
+            .expect("syntax.keyword must be set so diff deletions render in colour")
+            .into();
+
+        let added = string_style.color.expect("syntax.string must set a color");
+        let deleted = keyword_style
+            .color
+            .expect("syntax.keyword must set a color");
+
+        let background = find_background(&config);
+        let distance = rendered_distance(background, added, deleted);
+        assert!(
+            distance > 0.06,
+            "diff additions and deletions read as the same colour once painted \
+             (distance {distance:.3})"
+        );
+
+        let added_rgb = gpui::Rgba::from(added);
+        let deleted_rgb = gpui::Rgba::from(deleted);
+        assert!(
+            added_rgb.g > added_rgb.r && added_rgb.g > added_rgb.b,
+            "syntax.string should resolve to a green so additions read as additions"
+        );
+        assert!(
+            deleted_rgb.r > deleted_rgb.g && deleted_rgb.r > deleted_rgb.b,
+            "syntax.keyword should resolve to a red so deletions read as deletions"
+        );
+    }
+
+    fn find_background(config: &ThemeConfig) -> gpui::Hsla {
+        let mut theme = Theme::default();
+        theme.apply_config(&Rc::new(config.clone()));
+        theme.background
     }
 }

@@ -15,14 +15,17 @@ type Swatch = fn(&ThemeColor) -> Hsla;
 /// [`PALETTE_SIZE`] apart — the only way this mapping can repeat a colour — are never
 /// adjacent in a real layout without many more concurrent lanes than a readable graph has.
 ///
-/// The eighth entry reads `yellow_light`, not `magenta_light`. Under Catppuccin, a theme
-/// sets `magenta_light` to the same hue as `magenta` at reduced alpha rather than a
-/// distinct tint — under Frappé the two resolve to identical RGB, differing only in
-/// opacity, which a 1-2px lane stroke cannot read as two colours. `yellow_light` has no
-/// such override in either theme this crate applies (`theme_palette`), so it falls back
-/// to gpui-component's own background-blended tint like `blue_light` does, keeping every
-/// entry a genuinely distinct hue under both Catppuccin Latte and Frappé (see this
-/// file's own tests below for the resolved values this was checked against).
+/// The eighth entry reads `yellow_light`, not `magenta_light`. Under Catppuccin Frappé
+/// (this crate's dark theme, `theme_palette::DARK_THEME_NAME`), a theme sets
+/// `magenta_light` to the same hue as `magenta` at reduced alpha rather than a distinct
+/// tint, so the two resolve to identical RGB, differing only in opacity — which a 1-2px
+/// lane stroke cannot read as two colours. `yellow_light` has no such override under
+/// Frappé, so it falls back there to gpui-component's own background-blended tint like
+/// `blue_light` does. Gitr Light (`theme_palette::LIGHT_THEME_NAME`) sets `blue_light`
+/// and `yellow_light` explicitly instead — to indigo and orange respectively — rather
+/// than relying on that same fallback tint against its own, differently-coloured
+/// background (see this file's own tests below for the resolved values this was checked
+/// against).
 const PALETTE: [Swatch; PALETTE_SIZE as usize] = [
     |theme| theme.blue,
     |theme| theme.green,
@@ -57,7 +60,7 @@ mod tests {
     }
 
     #[test]
-    fn every_entry_is_distinguishable_under_github_light() {
+    fn every_entry_is_distinguishable_under_gitr_light() {
         assert_all_distinct(&crate::theme_palette::resolve_for_tests(
             crate::theme_palette::LIGHT_THEME_NAME,
         ));

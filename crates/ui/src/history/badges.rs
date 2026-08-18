@@ -82,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn every_kind_is_distinguishable_under_github_light() {
+    fn every_kind_is_distinguishable_under_gitr_light() {
         assert_all_distinct(&crate::theme_palette::resolve_for_tests(
             crate::theme_palette::LIGHT_THEME_NAME,
         ));
