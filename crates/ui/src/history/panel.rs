@@ -22,6 +22,7 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::density;
 use crate::repository::model::{History, HistoryFilter, LoadState};
 
 use super::delegate::HistoryTableDelegate;
@@ -206,7 +207,7 @@ impl Render for HistoryPanel {
 
         let mut tabs = TabBar::new("history-scope")
             .segmented()
-            .xsmall()
+            .small()
             .on_click(cx.listener(|this, index: &usize, _, cx| {
                 if let Some(scope) = scope_options(&this.branch_scope).get(*index).cloned() {
                     this.select_scope(scope, cx);
@@ -240,10 +241,12 @@ impl Render for HistoryPanel {
                     ),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(DataTable::new(&self.table).stripe(true)),
+                div().flex_1().min_h_0().child(
+                    DataTable::new(&self.table)
+                        .stripe(true)
+                        .bordered(false)
+                        .with_size(density::TABLE_ROW_HEIGHT),
+                ),
             )
     }
 }

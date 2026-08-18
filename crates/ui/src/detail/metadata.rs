@@ -1,18 +1,17 @@
-//! Renders the commit metadata header: subject, identifier, parents and author, followed
-//! by the commit message body when there is one.
+//! Renders the commit metadata header (subject, identifier, parents and author) and,
+//! separately, the commit message body — split because [`render_header`] stays pinned
+//! above the detail panel's scroll region while [`render_description`] scrolls with the
+//! diff. See `detail::ready_state` for where the two are recombined.
 
 use domain::{Commit, Parents};
-use gpui::{
-    AnyElement, App, IntoElement, ParentElement as _, Styled as _, div,
-    prelude::FluentBuilder as _, px,
-};
+use gpui::{AnyElement, App, IntoElement, ParentElement as _, Styled as _, div, px};
 use gpui_component::ActiveTheme as _;
 
 use super::format::{abbreviate, format_timestamp};
 
 const LABEL_WIDTH: f32 = 84.;
 
-pub(super) fn render(commit: &Commit, cx: &App) -> impl IntoElement {
+pub(super) fn render_header(commit: &Commit, cx: &App) -> impl IntoElement {
     let mono = cx.theme().mono_font_family.clone();
 
     let mut rows = vec![
@@ -30,17 +29,25 @@ pub(super) fn render(commit: &Commit, cx: &App) -> impl IntoElement {
 
     rows.push(row("Author", div().child(author_line(commit)), cx));
 
-    div().flex().flex_col().gap_1().p_3().children(rows).when(
-        !commit.body.trim().is_empty(),
-        |element| {
-            element.child(
-                div()
-                    .mt_2()
-                    .text_sm()
-                    .text_color(cx.theme().foreground)
-                    .child(commit.body.trim().to_string()),
-            )
-        },
+    div().flex().flex_col().gap_1().p_3().children(rows)
+}
+
+/// The commit message body, if it has one beyond the subject line — `None` renders
+/// nothing rather than an empty scroll-region row.
+pub(super) fn render_description(commit: &Commit, cx: &App) -> Option<AnyElement> {
+    let body = commit.body.trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    Some(
+        div()
+            .px_3()
+            .py_3()
+            .text_sm()
+            .text_color(cx.theme().foreground)
+            .child(body.to_string())
+            .into_any_element(),
     )
 }
 

@@ -1,54 +1,43 @@
-//! Renders a `Patch` as a scrollable, monospaced diff: one block per file, one row per
-//! diff line, coloured by [`format::classify_line`].
+//! Renders a `Patch` as a monospaced diff: one block per file, one row per diff line,
+//! coloured by [`format::classify_line`].
+//!
+//! Renders its content plainly rather than owning a scroll container — `detail::ready_state`
+//! places this alongside the commit description under one shared `ScrollHandle`, since the
+//! two are meant to scroll together.
 
 use domain::{DiffLine, FilePatch, Hunk, LineOrigin, Patch};
 use gpui::{
-    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
-    px,
+    AnyElement, App, IntoElement, ParentElement as _, SharedString, Styled as _, div,
+    prelude::FluentBuilder as _, px,
 };
-use gpui_component::{ActiveTheme as _, scroll::ScrollableElement as _, separator::Separator};
+use gpui_component::{ActiveTheme as _, separator::Separator};
 
 use super::format::{self, FileBody};
 
 const GUTTER_WIDTH: f32 = 44.;
 const MARKER_WIDTH: f32 = 16.;
 
-pub(super) fn render(patch: &Patch, cx: &App, scroll_handle: &ScrollHandle) -> AnyElement {
+pub(super) fn render(patch: &Patch, cx: &App) -> AnyElement {
     if patch.files.is_empty() {
         return div()
-            .flex_1()
-            .min_h_0()
             .flex()
-            .items_center()
-            .justify_center()
-            .text_color(cx.theme().muted_foreground)
-            .child("This commit changes nothing.")
+            .flex_col()
+            .child(Separator::horizontal().color(cx.theme().border))
+            .child(placeholder_row(cx, "This commit changes nothing."))
             .into_any_element();
     }
 
     let mono = cx.theme().mono_font_family.clone();
 
     div()
-        .relative()
-        .flex_1()
-        .min_h_0()
-        .child(
-            div()
-                .id("detail-diff-scroll")
-                .size_full()
-                .overflow_y_scroll()
-                .track_scroll(scroll_handle)
-                .flex()
-                .flex_col()
-                .children(
-                    patch
-                        .files
-                        .iter()
-                        .map(|file| file_block(file, cx, mono.clone())),
-                ),
+        .flex()
+        .flex_col()
+        .children(
+            patch
+                .files
+                .iter()
+                .map(|file| file_block(file, cx, mono.clone())),
         )
-        .vertical_scrollbar(scroll_handle)
         .into_any_element()
 }
 
@@ -67,9 +56,16 @@ fn file_block(file: &FilePatch, cx: &App, mono: SharedString) -> impl IntoElemen
                 .py_1()
                 .font_family(mono.clone())
                 .text_color(cx.theme().foreground)
-                .child(format::file_header(file))
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(format::file_header(file)),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
                         .text_color(cx.theme().muted_foreground)
                         .child(format::diff_stat(file)),
                 ),

@@ -1,8 +1,13 @@
-//! The bottom dock's commit detail panel: a metadata header plus a scrollable diff viewer.
+//! The right dock's commit detail panel: a fixed metadata header plus a single scrollable
+//! region carrying the commit description and the diff beneath it.
 //!
 //! [`DetailPanel`] renders exactly the [`LoadState`] it is handed — it never reads a
-//! repository itself. See [`metadata`] for the header and [`diff`] for the patch viewer;
-//! [`format`] holds the logic pulled out of both so it can be unit-tested without a window.
+//! repository itself. [`metadata::render_header`] is the part that never scrolls away —
+//! Subject, ID, Parents and Author — while [`metadata::render_description`] (the commit
+//! message body) scrolls together with [`diff::render`] under one `ScrollHandle`, since a
+//! long description is exactly the kind of content a short fixed header would otherwise
+//! clip. [`format`] holds the logic pulled out of both so it can be unit-tested without a
+//! window.
 
 mod diff;
 mod format;
@@ -11,13 +16,15 @@ mod metadata;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement as _, Render, ScrollHandle, Styled as _, Window, div,
+    AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _,
+    Styled as _, Window, div,
 };
 use gpui_component::{
     ActiveTheme as _,
     alert::Alert,
     dock::{Panel, PanelEvent},
+    scroll::ScrollableElement as _,
     spinner::Spinner,
 };
 
@@ -117,7 +124,24 @@ fn ready_state(detail: &CommitDetail, scroll_handle: &ScrollHandle, cx: &App) ->
         .size_full()
         .flex()
         .flex_col()
-        .child(metadata::render(&detail.commit, cx))
-        .child(diff::render(&detail.patch, cx, scroll_handle))
+        .child(metadata::render_header(&detail.commit, cx))
+        .child(
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    div()
+                        .id("detail-scroll")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(scroll_handle)
+                        .flex()
+                        .flex_col()
+                        .children(metadata::render_description(&detail.commit, cx))
+                        .child(diff::render(&detail.patch, cx)),
+                )
+                .vertical_scrollbar(scroll_handle),
+        )
         .into_any_element()
 }

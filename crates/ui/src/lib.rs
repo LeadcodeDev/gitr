@@ -11,6 +11,7 @@
 //! [`detail::DetailPanel`] — see `install_default_layout` in `workspace` for exactly
 //! where those two panels plug into the dock.
 
+pub mod density;
 pub mod detail;
 pub mod graph_palette;
 pub mod history;
@@ -30,10 +31,13 @@ use history::HistoryPanel;
 /// Registers everything this crate owns in the global `App` state.
 ///
 /// Must run after `gpui_component::init(cx)` and before a saved dock layout is loaded:
-/// this teaches `gpui_component`'s `PanelRegistry` how to rebuild [`HistoryPanel`] and
-/// [`DetailPanel`] from persisted JSON, and a layout referencing an unregistered panel
-/// name silently falls back to `gpui_component`'s `InvalidPanel`.
+/// `gpui_component::init` is what installs the `Theme` global [`density::apply`]
+/// overrides, and this teaches `gpui_component`'s `PanelRegistry` how to rebuild
+/// [`HistoryPanel`] and [`DetailPanel`] from persisted JSON — a layout referencing an
+/// unregistered panel name silently falls back to `gpui_component`'s `InvalidPanel`.
 pub fn init(cx: &mut App) {
+    density::apply(cx);
+
     register_panel(cx, "HistoryPanel", |_, _, _, window, cx| {
         Box::new(cx.new(|cx| HistoryPanel::new(window, cx)))
     });

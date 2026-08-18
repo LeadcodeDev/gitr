@@ -1,22 +1,22 @@
-//! Root view of a gitr window: title bar, sidebar, centre/bottom dock and status bar.
+//! Root view of a gitr window: title bar, sidebar, centre/right dock and status bar.
 //!
 //! ```text
-//! ┌─ TitleBar : gitr — <repo> · <branch> ──────────────────────────────┐
-//! ├───────────────┬────────────────────────────────────────────────────┤
-//! │ [repo ▾]      │ centre dock: HistoryPanel                          │
-//! │ ▸ Working     │                                                    │
-//! │ ▾ Branches    │                                                    │
-//! │ ▸ Remotes     ├──────────────── bottom dock ───────────────────────┤
-//! │ ▸ Tags        │ DetailPanel                                        │
-//! │ ▸ Stashes     │                                                    │
-//! ├───────────────┴────────────────────────────────────────────────────┤
-//! │ StatusBar : N commits · theme toggle                                │
-//! └────────────────────────────────────────────────────────────────────┘
+//! ┌─ TitleBar : gitr — <repo> · <branch> ────────────────────────────────────┐
+//! ├───────────────┬───────────────────────────────────────┬────────────────┤
+//! │ [repo ▾]      │ centre dock: HistoryPanel              │ right dock:    │
+//! │ ▸ Working     │                                        │ DetailPanel    │
+//! │ ▾ Branches    │                                        │                │
+//! │ ▸ Remotes     │                                        │                │
+//! │ ▸ Tags        │                                        │                │
+//! │ ▸ Stashes     │                                        │                │
+//! ├───────────────┴───────────────────────────────────────┴────────────────┤
+//! │ StatusBar : N commits · theme toggle                                     │
+//! └───────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! The sidebar is plain window chrome, laid out beside [`DockArea`] rather than inside
 //! it as a left dock: it is permanent navigation, not a panel a user drags or closes. The
-//! dock only ever owns the centre and bottom placements here — see
+//! dock only ever owns the centre and right placements here — see
 //! [`install_default_layout`] for exactly where the history and detail panels plug in.
 //!
 //! [`Workspace`] owns the single [`RepositoryState`] this window is open on. Every
@@ -52,12 +52,19 @@ use crate::{
 const DOCK_AREA_ID: &str = "gitr-dock";
 
 /// Bumping this invalidates a layout persisted against a different default — see
-/// [`install_default_layout`]. Bumped from `1` to `2` here because the centre and bottom
-/// docks now hold [`HistoryPanel`] and [`DetailPanel`] instead of the placeholder seam
-/// panels: a layout saved against the old names must not silently restore over them.
-pub(crate) const DOCK_AREA_VERSION: usize = 2;
+/// [`install_default_layout`]. Bumped from `1` to `2` when the centre and bottom docks
+/// started holding [`HistoryPanel`] and [`DetailPanel`] instead of the placeholder seam
+/// panels, and from `2` to `3` when [`DetailPanel`] moved from the bottom dock to the
+/// right dock: a layout persisted against either older default must not silently restore
+/// the detail panel to the bottom.
+pub(crate) const DOCK_AREA_VERSION: usize = 3;
 
-const BOTTOM_DOCK_HEIGHT: f32 = 240.;
+/// Width of the right dock holding [`DetailPanel`]. A commit's metadata header reads
+/// as a handful of label/value rows regardless of width, but the diff beneath it is
+/// prose-like — 480px is narrow enough to keep the history table's own columns
+/// comfortable next to it, wide enough that an 80-column diff line doesn't wrap.
+const DETAIL_DOCK_WIDTH: f32 = 480.;
+
 const SAVE_DEBOUNCE: Duration = Duration::from_secs(10);
 
 /// Root view of a gitr window.
@@ -251,8 +258,8 @@ impl Workspace {
     }
 }
 
-/// Builds the default centre/bottom layout — a [`HistoryPanel`] tab in the centre and a
-/// [`DetailPanel`] tab in the bottom dock — and hands both back so [`Workspace`] always
+/// Builds the default centre/right layout — a [`HistoryPanel`] tab in the centre and a
+/// [`DetailPanel`] tab in the right dock — and hands both back so [`Workspace`] always
 /// has a handle to push repository state into, whether this ran because no layout was
 /// saved yet or because a saved one turned out not to contain them.
 fn install_default_layout(
@@ -266,15 +273,15 @@ fn install_default_layout(
     let detail_panel = cx.new(|cx| DetailPanel::new(window, cx));
 
     let center = DockItem::tab(history_panel.clone(), &weak_dock_area, window, cx);
-    let bottom = DockItem::tab(detail_panel.clone(), &weak_dock_area, window, cx);
+    let right = DockItem::tab(detail_panel.clone(), &weak_dock_area, window, cx);
 
     dock_area.update(cx, |area, cx| {
         area.set_version(DOCK_AREA_VERSION, window, cx);
         area.set_center(center, window, cx);
-        area.set_bottom_dock(bottom, Some(px(BOTTOM_DOCK_HEIGHT)), true, window, cx);
+        area.set_right_dock(right, Some(px(DETAIL_DOCK_WIDTH)), true, window, cx);
         area.set_dock_collapsible(
             Edges {
-                bottom: true,
+                right: true,
                 ..Default::default()
             },
             window,
