@@ -4,9 +4,19 @@
 //! from domain types to strings, so it is testable without a running window.
 
 use std::fmt::Write as _;
+use std::ops::Range;
 use std::path::PathBuf;
 
 use domain::{FilePatch, FileStatus, Hunk, LineOrigin, ObjectId, Patch, Timestamp};
+
+/// The UTF-8 byte range, into the text [`unified_diff_text_with_line_ranges`] produces,
+/// of every added and every deleted line — everything else (file headers, hunk headers,
+/// context lines) is left undecorated.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DiffLineRanges {
+    pub additions: Vec<Range<usize>>,
+    pub deletions: Vec<Range<usize>>,
+}
 
 /// Hexadecimal characters kept when an identifier is shown abbreviated, matching Git's
 /// own default abbreviation length.
@@ -120,20 +130,28 @@ fn side_path(path: Option<&PathBuf>, prefix: char) -> String {
     }
 }
 
-/// Rebuilds the unified diff text `git diff` would print for `patch`, so it can be fed to
-/// a real editor for syntax highlighting, selection and virtualised scrolling.
+/// Rebuilds the unified diff text `git diff` would print for `patch` — so it can be fed
+/// to a real editor for syntax highlighting, selection and virtualised scrolling — paired
+/// with the byte range of every added and deleted line, computed in the same pass so the
+/// text and the ranges can never disagree about where a line starts. Reconstructing the
+/// text and then re-scanning it for `+`/`-` lines would be a second implementation of the
+/// same rule, and a line whose own content begins with `+` or `-` is exactly where the
+/// two could differ.
 ///
 /// Mode lines (`new file mode`, `deleted file mode`) are Git prints that [`FilePatch`] has
-/// no data for, and are left out rather than fabricated.
-pub fn unified_diff_text(patch: &Patch) -> String {
+/// no data for, and are left out rather than fabricated. Each range starts at the line's
+/// leading marker byte, read from [`LineOrigin`] structurally rather than from the first
+/// byte of `line.content` — a line about a diff can itself start with `+` or `-`.
+pub fn unified_diff_text_with_line_ranges(patch: &Patch) -> (String, DiffLineRanges) {
     let mut text = String::new();
+    let mut ranges = DiffLineRanges::default();
     for file in &patch.files {
-        write_file(&mut text, file);
+        write_file(&mut text, file, &mut ranges);
     }
-    text
+    (text, ranges)
 }
 
-fn write_file(text: &mut String, file: &FilePatch) {
+fn write_file(text: &mut String, file: &FilePatch, ranges: &mut DiffLineRanges) {
     let old = file.old_path.as_ref();
     let new = file.new_path.as_ref();
 
@@ -189,7 +207,14 @@ fn write_file(text: &mut String, file: &FilePatch) {
                 LineOrigin::Deletion => '-',
                 LineOrigin::Context => ' ',
             };
+            let start = text.len();
             let _ = writeln!(text, "{marker}{}", line.content);
+            let end = text.len() - 1;
+            match line.origin {
+                LineOrigin::Addition => ranges.additions.push(start..end),
+                LineOrigin::Deletion => ranges.deletions.push(start..end),
+                LineOrigin::Context => {}
+            }
         }
     }
 }
@@ -198,6 +223,10 @@ fn write_file(text: &mut String, file: &FilePatch) {
 mod tests {
     use super::*;
     use domain::DiffLine;
+
+    fn unified_diff_text(patch: &Patch) -> String {
+        unified_diff_text_with_line_ranges(patch).0
+    }
 
     fn id(nibble: char) -> ObjectId {
         nibble.to_string().repeat(40).parse().unwrap()
@@ -459,5 +488,70 @@ mod tests {
         let a_pos = text.find("diff --git a/a.rs").unwrap();
         let b_pos = text.find("diff --git a/b.rs").unwrap();
         assert!(a_pos < b_pos);
+    }
+
+    #[test]
+    fn line_ranges_cover_additions_and_deletions_and_nothing_else() {
+        let patch = Patch {
+            files: vec![file(
+                Some("src/lib.rs"),
+                Some("src/lib.rs"),
+                FileStatus::Modified,
+                false,
+                vec![hunk(vec![
+                    line(LineOrigin::Context, "fn existing() {"),
+                    line(LineOrigin::Deletion, "    old();"),
+                    line(LineOrigin::Addition, "    new();"),
+                ])],
+            )],
+        };
+        let (text, ranges) = unified_diff_text_with_line_ranges(&patch);
+
+        assert_eq!(ranges.additions.len(), 1);
+        assert_eq!(ranges.deletions.len(), 1);
+
+        let addition = &text[ranges.additions[0].clone()];
+        assert_eq!(addition, "+    new();");
+
+        let deletion = &text[ranges.deletions[0].clone()];
+        assert_eq!(deletion, "-    old();");
+
+        let file_header_pos = text.find("diff --git").unwrap();
+        let hunk_header_pos = text.find("@@").unwrap();
+        let context_pos = text.find(" fn existing() {").unwrap();
+        for range in ranges.additions.iter().chain(&ranges.deletions) {
+            assert!(!range.contains(&file_header_pos));
+            assert!(!range.contains(&hunk_header_pos));
+            assert!(!range.contains(&context_pos));
+        }
+    }
+
+    #[test]
+    fn line_ranges_are_read_from_the_marker_column_not_the_lines_own_content() {
+        let patch = Patch {
+            files: vec![file(
+                Some("src/lib.rs"),
+                Some("src/lib.rs"),
+                FileStatus::Modified,
+                false,
+                vec![hunk(vec![
+                    line(LineOrigin::Context, "+not actually an addition"),
+                    line(LineOrigin::Addition, "-not actually a deletion"),
+                    line(LineOrigin::Deletion, "+not actually an addition either"),
+                ])],
+            )],
+        };
+        let (text, ranges) = unified_diff_text_with_line_ranges(&patch);
+
+        assert_eq!(ranges.additions.len(), 1);
+        assert_eq!(ranges.deletions.len(), 1);
+
+        let addition = &text[ranges.additions[0].clone()];
+        assert!(addition.starts_with('+'));
+        assert_eq!(addition, "+-not actually a deletion");
+
+        let deletion = &text[ranges.deletions[0].clone()];
+        assert!(deletion.starts_with('-'));
+        assert_eq!(deletion, "-+not actually an addition either");
     }
 }

@@ -1,19 +1,24 @@
-//! The right dock's commit detail panel: a fixed metadata header, a capped-height
-//! description region, and the diff in a real code editor beneath it.
+//! The right dock's commit detail panel: a tab bar switching between commit metadata and
+//! the diff, above whichever of the two is selected.
 //!
 //! [`DetailPanel`] renders exactly the [`LoadState`] it is handed — it never reads a
-//! repository itself. [`metadata::render_header`] is the part that never scrolls away —
-//! Subject, ID, Parents and Author. [`format`] holds the logic pulled out of both
-//! [`metadata`] and [`diff`] so it can be unit-tested without a window, in particular
-//! [`format::unified_diff_text`], which reconstructs the text fed to the diff editor.
+//! repository itself. [`metadata::render_header`] and [`metadata::render_description`]
+//! are the general-information tab's content — Subject, ID, Parents, Author and the
+//! commit body. [`format`] holds the logic pulled out of both [`metadata`] and [`diff`]
+//! so it can be unit-tested without a window, in particular
+//! [`format::unified_diff_text_with_line_ranges`], which reconstructs the text fed to the
+//! diff editor together with the byte ranges [`decorations`] turns into line backgrounds.
 //!
-//! The diff editor is a persistent [`EditorState`] entity owned by [`DetailPanel`]
-//! rather than rebuilt every render, because updating it — like creating it — needs a
+//! The diff editor is a persistent [`EditorState`] entity owned by [`DetailPanel`] rather
+//! than rebuilt every render, because updating it — like creating it — needs a
 //! `&mut Window`, which only [`DetailPanel::new`] and [`Render::render`] receive.
-//! [`DetailPanel::set_detail`] cannot reach one, so it stages the reconstructed text in
-//! `pending_diff` and [`Render::render`] flushes it into the entity on the next frame,
-//! before building this render pass's element tree.
+//! [`DetailPanel::set_detail`] cannot reach one, so it stages the reconstructed text and
+//! ranges in `pending_diff` and [`Render::render`] flushes them into the entity and its
+//! decorations collection on the next frame, before building this render pass's element
+//! tree. [`DetailPanel::selected_tab`] is never touched by `set_detail`, which is what
+//! lets picking a different commit leave the open tab alone.
 
+mod decorations;
 mod diff;
 mod format;
 mod metadata;
@@ -25,19 +30,49 @@ use gpui::{
     IntoElement, ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, Window, div,
 };
 use gpui_component::{
-    ActiveTheme as _,
+    ActiveTheme as _, Sizable as _,
     alert::Alert,
     dock::{Panel, PanelEvent},
-    input::EditorState,
+    input::{EditorState, TextDecorationCollection},
     spinner::Spinner,
+    tab::{Tab, TabBar},
 };
 
 use crate::repository::{CommitDetail, LoadState};
+use format::DiffLineRanges;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DetailTab {
+    #[default]
+    General,
+    Diff,
+}
+
+impl DetailTab {
+    const ALL: [DetailTab; 2] = [DetailTab::General, DetailTab::Diff];
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self::ALL.get(index).copied().unwrap_or_default()
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            DetailTab::General => "General",
+            DetailTab::Diff => "Diffs",
+        }
+    }
+}
 
 pub struct DetailPanel {
     detail: LoadState<Arc<CommitDetail>>,
-    pending_diff: Option<SharedString>,
+    pending_diff: Option<(SharedString, DiffLineRanges)>,
     diff_editor: Entity<EditorState>,
+    diff_decorations: TextDecorationCollection,
+    selected_tab: DetailTab,
     description_scroll_handle: ScrollHandle,
     focus_handle: FocusHandle,
 }
@@ -45,10 +80,15 @@ pub struct DetailPanel {
 impl DetailPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let diff_editor = cx.new(|cx| EditorState::new(window, cx).language("diff"));
+        let diff_decorations = diff_editor.update(cx, |state, cx| {
+            state.create_decorations_collection(Vec::new(), cx)
+        });
         Self {
             detail: LoadState::Idle,
             pending_diff: None,
             diff_editor,
+            diff_decorations,
+            selected_tab: DetailTab::default(),
             description_scroll_handle: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
         }
@@ -58,7 +98,8 @@ impl DetailPanel {
         if let LoadState::Ready(commit_detail) = &detail
             && !commit_detail.patch.files.is_empty()
         {
-            self.pending_diff = Some(format::unified_diff_text(&commit_detail.patch).into());
+            let (text, ranges) = format::unified_diff_text_with_line_ranges(&commit_detail.patch);
+            self.pending_diff = Some((text.into(), ranges));
         }
         self.detail = detail;
         cx.notify();
@@ -89,28 +130,64 @@ impl Focusable for DetailPanel {
 
 impl Render for DetailPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(text) = self.pending_diff.take() {
+        if let Some((text, ranges)) = self.pending_diff.take() {
+            let colors = decorations::line_backgrounds(cx.theme().mode);
+            let new_decorations = decorations::build_decorations(&ranges, &colors);
             self.diff_editor
                 .update(cx, |state, cx| state.set_value(text, window, cx));
+            self.diff_decorations.set(new_decorations, cx);
         }
 
-        match &self.detail {
-            LoadState::Idle => centered_message(cx, "Select a commit to see its details."),
-            LoadState::Loading => loading_state(cx),
-            LoadState::Failed(message) => failed_state(message),
-            LoadState::Ready(detail) => ready_state(
-                detail,
-                &self.diff_editor,
-                &self.description_scroll_handle,
-                cx,
-            ),
-        }
+        let selected_tab = self.selected_tab;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(tab_bar(selected_tab, cx))
+            .child(match &self.detail {
+                LoadState::Idle => centered_message(cx, "Select a commit to see its details."),
+                LoadState::Loading => loading_state(cx),
+                LoadState::Failed(message) => failed_state(message),
+                LoadState::Ready(detail) => ready_state(
+                    detail,
+                    selected_tab,
+                    &self.diff_editor,
+                    &self.description_scroll_handle,
+                    cx,
+                ),
+            })
     }
+}
+
+fn tab_bar(selected: DetailTab, cx: &mut Context<DetailPanel>) -> AnyElement {
+    let mut tabs = TabBar::new("detail-tabs")
+        .segmented()
+        .small()
+        .selected_index(selected.index())
+        .on_click(cx.listener(|this, index: &usize, _, cx| {
+            this.selected_tab = DetailTab::from_index(*index);
+            cx.notify();
+        }));
+    for tab in DetailTab::ALL {
+        tabs = tabs.child(Tab::new().label(tab.label()));
+    }
+
+    div()
+        .flex_shrink_0()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(tabs)
+        .into_any_element()
 }
 
 fn centered_message(cx: &App, message: &str) -> AnyElement {
     div()
-        .size_full()
+        .flex_1()
+        .min_h_0()
         .flex()
         .items_center()
         .justify_center()
@@ -121,7 +198,8 @@ fn centered_message(cx: &App, message: &str) -> AnyElement {
 
 fn loading_state(cx: &App) -> AnyElement {
     div()
-        .size_full()
+        .flex_1()
+        .min_h_0()
         .flex()
         .items_center()
         .justify_center()
@@ -137,7 +215,8 @@ fn loading_state(cx: &App) -> AnyElement {
 
 fn failed_state(message: &str) -> AnyElement {
     div()
-        .size_full()
+        .flex_1()
+        .min_h_0()
         .p_3()
         .child(Alert::error("detail-panel-error", message.to_string()))
         .into_any_element()
@@ -145,12 +224,26 @@ fn failed_state(message: &str) -> AnyElement {
 
 fn ready_state(
     detail: &CommitDetail,
+    selected_tab: DetailTab,
     diff_editor: &Entity<EditorState>,
     description_scroll_handle: &ScrollHandle,
     cx: &App,
 ) -> AnyElement {
+    match selected_tab {
+        DetailTab::General => general_tab(detail, description_scroll_handle, cx),
+        DetailTab::Diff => diff_tab(detail, diff_editor, cx),
+    }
+}
+
+fn general_tab(
+    detail: &CommitDetail,
+    description_scroll_handle: &ScrollHandle,
+    cx: &App,
+) -> AnyElement {
     div()
-        .size_full()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
         .flex()
         .flex_col()
         .child(metadata::render_header(&detail.commit, cx))
@@ -165,12 +258,16 @@ fn ready_state(
                     &detail.commit,
                     description_scroll_handle,
                     cx,
-                ))
-                .child(div().flex_1().min_h_0().min_w_0().child(diff::render(
-                    &detail.patch,
-                    diff_editor,
-                    cx,
-                ))),
+                )),
         )
+        .into_any_element()
+}
+
+fn diff_tab(detail: &CommitDetail, diff_editor: &Entity<EditorState>, cx: &App) -> AnyElement {
+    div()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .child(diff::render(&detail.patch, diff_editor, cx))
         .into_any_element()
 }
