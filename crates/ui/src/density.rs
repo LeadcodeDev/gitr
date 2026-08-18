@@ -41,6 +41,12 @@ pub const SIDEBAR_ROW_HEIGHT: Pixels = px(20.);
 /// Horizontal indent added per nesting depth in the sidebar's reference tree.
 pub const SIDEBAR_INDENT: Pixels = px(10.);
 
+/// Height the commit detail panel's description region caps out at before it grows its
+/// own scrollbar, so an unusually long commit body cannot squeeze the diff editor beneath
+/// it out of the panel. About 15 lines at [`FONT_SIZE`] with default line height — enough
+/// for a typical multi-paragraph message without one dominating the fixed-height dock.
+pub const DETAIL_DESCRIPTION_MAX_HEIGHT: Pixels = px(220.);
+
 /// Applies the density scale to the global [`Theme`].
 ///
 /// Must run after `gpui_component::init(cx)` installs the `Theme` global. Safe to call
