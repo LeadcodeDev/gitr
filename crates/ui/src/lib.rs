@@ -15,6 +15,7 @@ pub mod dock_seam;
 pub mod graph_palette;
 pub mod persistence;
 pub mod placeholder;
+pub mod repository;
 pub mod sidebar;
 pub mod workspace;
 
