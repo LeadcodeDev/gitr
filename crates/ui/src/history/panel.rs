@@ -106,6 +106,17 @@ impl HistoryPanel {
         cx.notify();
     }
 
+    /// Drops everything that belonged to the repository previously shown, including the
+    /// remembered branch scope.
+    ///
+    /// [`Self::set_filter`] with a default filter is not enough: it clears the scope and
+    /// the query but leaves `branch_scope`, so a branch tab from the previous project
+    /// survives a switch and fails against the new repository when clicked.
+    pub fn reset_for_new_repository(&mut self, cx: &mut Context<Self>) {
+        self.branch_scope = None;
+        self.set_filter(HistoryFilter::default(), cx);
+    }
+
     pub fn set_filter(&mut self, filter: HistoryFilter, cx: &mut Context<Self>) {
         if let HistoryScope::Single(reference) = &filter.scope {
             self.branch_scope = Some(reference.clone());
@@ -268,6 +279,23 @@ impl Render for HistoryPanel {
 mod tests {
     use super::*;
     use domain::BranchName;
+
+    #[test]
+    fn forgetting_the_branch_scope_drops_the_third_tab_it_offered() {
+        let remembered = Some(Reference::LocalBranch(BranchName::new("main").unwrap()));
+
+        assert_eq!(
+            scope_options(&remembered).len(),
+            3,
+            "a remembered branch is offered as a third scope"
+        );
+        assert_eq!(
+            scope_options(&None).len(),
+            2,
+            "clearing it must take that tab away, or a switch leaves the previous project's \
+             branch offered against a repository that has no such ref"
+        );
+    }
 
     #[test]
     fn without_a_branch_scope_only_all_and_local_are_offered() {

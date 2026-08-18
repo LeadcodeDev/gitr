@@ -21,19 +21,24 @@
 //! see [`install_default_layout`] for exactly how. The detail panel's half of that split
 //! can be entirely absent from the tree; [`Workspace::reveal_detail`] is what puts it back.
 //!
-//! [`Workspace`] owns the single [`RepositoryState`] this window is open on. Every
-//! `RepositoryEvent` it emits is pushed into the panels here; nothing downstream reads a
-//! repository itself.
+//! [`Workspace`] owns the single [`RepositoryState`] the window currently has open, plus
+//! the full [`ProjectList`] of every project the user has added. Only the active project
+//! ever has a live [`RepositoryState`] — switching, in [`Workspace::open_project`], drops
+//! the old one (and with it its background reads and its filesystem watcher thread)
+//! before the new one is created, so there is never a moment with two watchers running
+//! or with a frame mixing one project's history under another's name. Every
+//! `RepositoryEvent` the active repository emits is pushed into the panels here; nothing
+//! downstream reads a repository itself.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use domain::{HeadState, HistoryScope, Reference};
 use gpui::{
     Animation, AnimationExt as _, App, AppContext as _, Axis, Context, Entity, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Subscription,
-    Task, WeakEntity, Window, div, ease_in_out, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
+    Styled as _, Subscription, Task, WeakEntity, Window, div, ease_in_out, px,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Root, Sizable as _, Theme, ThemeMode, TitleBar, WindowExt as _,
@@ -49,6 +54,7 @@ use crate::{
     detail::DetailPanel,
     history::{HistoryPanel, HistoryPanelEvent},
     persistence,
+    project::{Project, ProjectList, ProjectSource, display_name, resolve_repository_root},
     repository::{History, HistoryFilter, LoadState, RepositoryEvent, RepositoryState},
     sidebar,
     theme_preference::ThemePreference,
@@ -104,6 +110,7 @@ struct ThemeTransition {
 /// Root view of a gitr window.
 pub struct Workspace {
     dock_area: Entity<DockArea>,
+    projects: ProjectList,
     repository: Entity<RepositoryState>,
     history_panel: Entity<HistoryPanel>,
     detail_panel: Entity<DetailPanel>,
@@ -124,10 +131,23 @@ pub struct Workspace {
     _dock_subscription: Subscription,
     _repository_subscription: Subscription,
     _history_panel_subscription: Subscription,
+    _window_closed_subscription: Subscription,
 }
 
 impl Workspace {
-    pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// Builds the window on `projects.active_project()`.
+    ///
+    /// `.expect(..)` below is provably infallible, not merely assumed: the only caller,
+    /// `crates/gitr/src/main.rs`, seeds one project from the CLI argument or the working
+    /// directory whenever the persisted list it loads is empty, before this is ever
+    /// called, so `projects` always has an active project by the time it gets here.
+    ///
+    /// gitr opens exactly one window, so there is no "close this one, keep the others
+    /// running" case for it to leave open: `App::on_window_closed` firing for any window
+    /// closing is indistinguishable from *the* window closing here, and the `cx.quit()`
+    /// it calls runs the `on_app_quit` handler registered below before the process ends,
+    /// so the dock layout still gets its last save.
+    pub fn new(projects: ProjectList, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let theme_preference = theme_preference_at_startup();
         apply_theme_preference(theme_preference, window, cx);
 
@@ -138,7 +158,14 @@ impl Workspace {
             }
         });
 
-        let repository = cx.new(|cx| RepositoryState::open(path, cx));
+        let active_project = projects
+            .active_project()
+            .cloned()
+            .expect("crates/gitr/src/main.rs never opens a window on an empty project list");
+        let active_path = match &active_project.source {
+            ProjectSource::Local(path) => path.clone(),
+        };
+        let repository = cx.new(|cx| RepositoryState::open(active_path, cx));
 
         let dock_area =
             cx.new(|cx| DockArea::new(DOCK_AREA_ID, Some(DOCK_AREA_VERSION), window, cx));
@@ -165,10 +192,7 @@ impl Workspace {
         let (history_panel, detail_panel, detail_slot) =
             restored.unwrap_or_else(|| install_default_layout(&dock_area, window, cx));
 
-        let initial_history = repository.read(cx).history().clone();
-        let initial_detail = repository.read(cx).detail().clone();
-        history_panel.update(cx, |panel, cx| panel.set_history(initial_history, cx));
-        detail_panel.update(cx, |panel, cx| panel.set_detail(initial_detail, cx));
+        sync_panels_from_repository(&repository, &history_panel, &detail_panel, cx);
 
         let repository_subscription =
             cx.subscribe_in(&repository, window, Self::on_repository_event);
@@ -195,8 +219,11 @@ impl Workspace {
         })
         .detach();
 
+        let window_closed_subscription = cx.on_window_closed(|cx, _window_id| cx.quit());
+
         Self {
             dock_area,
+            projects,
             repository,
             history_panel,
             detail_panel,
@@ -211,6 +238,7 @@ impl Workspace {
             _dock_subscription: dock_subscription,
             _repository_subscription: repository_subscription,
             _history_panel_subscription: history_panel_subscription,
+            _window_closed_subscription: window_closed_subscription,
         }
     }
 
@@ -429,6 +457,145 @@ impl Workspace {
             });
         }));
     }
+
+    /// Replaces the live repository with `project`'s, and nothing else: `self.projects`
+    /// must already name `project` as active by the time this runs.
+    ///
+    /// The old [`RepositoryState`] is dropped the instant `self.repository` is
+    /// reassigned — with it go its background reads, its filesystem watcher thread, and
+    /// (once `self._repository_subscription` is reassigned too) its event subscription.
+    /// [`HistoryPanel`] and [`DetailPanel`] are reset to the new repository's starting
+    /// `Loading`/`Idle` state in this same call, and the history's scope and search
+    /// filter reset to their defaults — a scope naming a branch from the old repository
+    /// would not resolve against the new one. There is no frame in which the old
+    /// project's rows, detail, or filter are still showing under the new project's name.
+    fn open_project(&mut self, project: &Project, window: &mut Window, cx: &mut Context<Self>) {
+        let path = match &project.source {
+            ProjectSource::Local(path) => path.clone(),
+        };
+
+        let repository = cx.new(|cx| RepositoryState::open(path, cx));
+        sync_panels_from_repository(&repository, &self.history_panel, &self.detail_panel, cx);
+        self.history_panel
+            .update(cx, |panel, cx| panel.reset_for_new_repository(cx));
+
+        self._repository_subscription =
+            cx.subscribe_in(&repository, window, Self::on_repository_event);
+        self.repository = repository;
+    }
+
+    /// Adds `project` to the remembered list if it is not already there, makes it
+    /// active, persists the list, and — unless it was already the active project —
+    /// opens it. Used by the "open from disk" flow, which may be naming a project this
+    /// list has never seen. `crates/gitr/src/main.rs` does the equivalent add-or-activate
+    /// directly against the persisted [`ProjectList`] for `gitr <dir>`, since that happens
+    /// before the window, and this method, exist.
+    fn activate_project(&mut self, project: Project, window: &mut Window, cx: &mut Context<Self>) {
+        let already_active = self.projects.active.as_ref() == Some(&project.source);
+        self.projects.add_or_activate(project.clone());
+        self.persist_projects(cx);
+
+        if !already_active {
+            self.open_project(&project, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Handles a click on one of the switcher's project entries.
+    ///
+    /// `source` is always one [`project_menu_item`] read off `self.projects`, so
+    /// [`ProjectList::activate`] finding nothing for it would mean the menu was built
+    /// from stale data — reported rather than silently ignored, even though nothing in
+    /// this module can currently produce that.
+    fn switch_to(&mut self, source: ProjectSource, window: &mut Window, cx: &mut Context<Self>) {
+        if self.projects.active.as_ref() == Some(&source) {
+            return;
+        }
+        let Some(project) = self.projects.activate(&source).cloned() else {
+            eprintln!("gitr: project switcher chose a project no longer in the list");
+            return;
+        };
+
+        self.persist_projects(cx);
+        self.open_project(&project, window, cx);
+        cx.notify();
+    }
+
+    /// Resolves `path` to a repository root and adds it to the remembered list,
+    /// activating it. A path that does not lead to a Git repository is reported through
+    /// a notification — never a dialog, never a panic — and the list is left untouched.
+    fn add_project_from_disk(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = match resolve_repository_root(&path) {
+            Ok(root) => root,
+            Err(error) => {
+                window.push_notification((NotificationType::Error, error.to_string()), cx);
+                return;
+            }
+        };
+        self.activate_project(Project::local(root), window, cx);
+    }
+
+    /// Opens the native directory picker and, once the user chooses one, adds and
+    /// activates it through [`Self::add_project_from_disk`].
+    ///
+    /// A cancelled picker, a platform error, or a dropped channel all collapse to the
+    /// same "nothing chosen" outcome: there is nothing to add and nothing to report,
+    /// exactly like dismissing any other picker without choosing anything.
+    fn open_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+
+        cx.spawn_in(window, async move |workspace, window| {
+            let path = paths.await.ok()?.ok()??.into_iter().next()?;
+            let _ = workspace.update_in(window, move |workspace, window, cx| {
+                workspace.add_project_from_disk(path, window, cx);
+            });
+            Some(())
+        })
+        .detach();
+    }
+
+    /// Writes `self.projects` to disk on the background executor, mirroring
+    /// [`Self::set_theme_preference`]'s save: a project being added or switched is a
+    /// rare, deliberate action, so it is not debounced the way the dock layout's
+    /// frequent [`DockEvent::LayoutChanged`] is.
+    fn persist_projects(&self, cx: &mut Context<Self>) {
+        let projects = self.projects.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = persistence::save_project_list(&projects) {
+                    eprintln!("gitr: failed to save project list: {error:#}");
+                }
+            })
+            .detach();
+    }
+}
+
+/// Pushes `repository`'s current history and detail into `history_panel` and
+/// `detail_panel`. Called right after `RepositoryState::open` — while both are still
+/// `Loading`/`Idle`, since neither background read has completed yet — so
+/// [`Workspace::new`] and [`Workspace::open_project`] start every window and every
+/// switch from that same blank slate rather than whatever the previous repository last
+/// rendered.
+fn sync_panels_from_repository(
+    repository: &Entity<RepositoryState>,
+    history_panel: &Entity<HistoryPanel>,
+    detail_panel: &Entity<DetailPanel>,
+    cx: &mut Context<Workspace>,
+) {
+    let history = repository.read(cx).history().clone();
+    let detail = repository.read(cx).detail().clone();
+    history_panel.update(cx, |panel, cx| panel.set_history(history, cx));
+    detail_panel.update(cx, |panel, cx| panel.set_detail(detail, cx));
 }
 
 /// Reads the persisted theme preference, logging and defaulting on a genuine failure to
@@ -583,18 +750,13 @@ fn find_in_item<T: Panel>(item: &DockItem) -> Option<Entity<T>> {
     }
 }
 
-fn repository_display_name(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
 fn title_bar(
     repository_name: &str,
     head: &LoadState<HeadState>,
     sidebar_collapsed: bool,
     detail_visible: bool,
     theme_preference: ThemePreference,
+    projects: &ProjectList,
     cx: &mut Context<Workspace>,
 ) -> TitleBar {
     let branch = match head {
@@ -652,8 +814,72 @@ fn title_bar(
                             this.toggle_detail(window, cx);
                         })),
                 )
+                .child(project_switcher_control(projects, cx))
                 .child(theme_preference_control(theme_preference, cx)),
         )
+}
+
+/// The title bar's project control: a button that opens a menu listing every remembered
+/// project — checked on whichever is active, one click to switch — plus an "Open…" entry
+/// that hands off to [`Workspace::open_from_disk`]. `crates/ui/src/sidebar/mod.rs`'s
+/// header carries a dropdown of its own already, left inert for workstream #18 to build
+/// into the real selector; this is the functioning stand-in until then, kept in the title
+/// bar rather than in a file this workstream was told to leave alone.
+fn project_switcher_control(
+    projects: &ProjectList,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let workspace = cx.entity().downgrade();
+    let active = projects.active.clone();
+    let entries = projects.projects.clone();
+
+    Button::new("project-switcher")
+        .ghost()
+        .small()
+        .icon(IconName::FolderOpen)
+        .tooltip("Switch Project")
+        .dropdown_menu(move |menu, _, _| {
+            let menu = entries.iter().fold(menu, |menu, project| {
+                menu.item(project_menu_item(&workspace, project, active.as_ref()))
+            });
+            menu.separator().item(open_from_disk_menu_item(&workspace))
+        })
+}
+
+fn project_menu_item(
+    workspace: &WeakEntity<Workspace>,
+    project: &Project,
+    active: Option<&ProjectSource>,
+) -> PopupMenuItem {
+    let workspace = workspace.clone();
+    let source = project.source.clone();
+    let checked = active == Some(&project.source);
+    PopupMenuItem::new(project.name.clone())
+        .icon(IconName::FolderOpen)
+        .checked(checked)
+        .on_click(move |_, window, cx| {
+            let Some(workspace) = workspace.upgrade() else {
+                return;
+            };
+            let source = source.clone();
+            workspace.update(cx, |workspace, cx| {
+                workspace.switch_to(source, window, cx);
+            });
+        })
+}
+
+fn open_from_disk_menu_item(workspace: &WeakEntity<Workspace>) -> PopupMenuItem {
+    let workspace = workspace.clone();
+    PopupMenuItem::new("Open…")
+        .icon(IconName::Plus)
+        .on_click(move |_, window, cx| {
+            let Some(workspace) = workspace.upgrade() else {
+                return;
+            };
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_from_disk(window, cx);
+            });
+        })
 }
 
 /// The title bar's theme control: a button whose icon is the active preference's own
@@ -739,7 +965,7 @@ impl Render for Workspace {
         let head = self.repository.read(cx).head().clone();
         let references = self.repository.read(cx).references().clone();
         let history = self.repository.read(cx).history().clone();
-        let repository_name = repository_display_name(&path);
+        let repository_name = display_name(&path);
 
         let sheet_layer = Root::render_sheet_layer(window, cx);
         let dialog_layer = Root::render_dialog_layer(window, cx);
@@ -757,6 +983,7 @@ impl Render for Workspace {
                 sidebar_collapsed,
                 self.detail_slot.is_some(),
                 self.theme_preference,
+                &self.projects,
                 cx,
             ))
             .child(

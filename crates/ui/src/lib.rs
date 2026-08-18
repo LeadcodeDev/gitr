@@ -16,6 +16,7 @@ pub mod detail;
 pub mod graph_palette;
 pub mod history;
 pub mod persistence;
+pub mod project;
 pub mod repository;
 pub mod sidebar;
 mod theme_palette;
