@@ -347,15 +347,24 @@ fn failed<T>(message: String, cx: &mut Context<RepositoryState>) -> LoadState<T>
     LoadState::Failed(message)
 }
 
-fn read_head(path: &Path) -> Result<HeadState, domain::RepositoryError> {
+/// The four `read_*` functions below are the entire load path: each `reload_*` method
+/// only wraps one in `LoadState` bookkeeping. They are `pub` — wider than anything else
+/// in this module — because `gpui`'s `test-support` feature (needed for
+/// `gpui::TestAppContext`, which is what driving `RepositoryState` itself through
+/// `Context` in a test would require) is not enabled for this crate's `gpui` dependency,
+/// confirmed empirically: `use gpui::TestAppContext;` from `crates/ui/tests/` fails to
+/// resolve. `crates/ui/tests/repository_state.rs` calls these directly against real
+/// repositories instead, since that is the closest available proof that this module
+/// actually reads one.
+pub fn read_head(path: &Path) -> Result<HeadState, domain::RepositoryError> {
     GixRepositoryReader::open(path)?.head()
 }
 
-fn read_references(path: &Path) -> Result<Vec<RefEntry>, domain::RepositoryError> {
+pub fn read_references(path: &Path) -> Result<Vec<RefEntry>, domain::RepositoryError> {
     GixRepositoryReader::open(path)?.references()
 }
 
-fn read_history(
+pub fn read_history(
     path: &Path,
     request: &HistoryRequest,
 ) -> Result<(Vec<CommitSummary>, GraphLayout), domain::RepositoryError> {
@@ -364,7 +373,7 @@ fn read_history(
     Ok((commits, graph_layout))
 }
 
-fn read_commit_detail(path: &Path, id: ObjectId) -> Result<CommitDetail, String> {
+pub fn read_commit_detail(path: &Path, id: ObjectId) -> Result<CommitDetail, String> {
     let commit = GixRepositoryReader::open(path)
         .and_then(|reader| reader.commit(id))
         .map_err(|error| error.to_string())?;
