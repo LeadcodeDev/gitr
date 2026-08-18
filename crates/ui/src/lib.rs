@@ -11,8 +11,10 @@
 //! plug a history view and a detail view into the centre and bottom docks — see
 //! [`dock_seam`] and `install_default_layout` in `workspace` for exactly where.
 
+pub mod detail;
 pub mod dock_seam;
 pub mod graph_palette;
+pub mod history;
 pub mod persistence;
 pub mod placeholder;
 pub mod repository;
