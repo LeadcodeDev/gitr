@@ -9,8 +9,9 @@ use graph::GraphLayout;
 /// `Failed` carries a rendered message rather than the error itself: the views that display
 /// it cannot act on a typed error, and threading one through would make every view depend on
 /// every adapter's error enum.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LoadState<T> {
+    #[default]
     Idle,
     Loading,
     Ready(T),
@@ -34,12 +35,6 @@ impl<T> LoadState<T> {
             Self::Failed(message) => Some(message),
             _ => None,
         }
-    }
-}
-
-impl<T> Default for LoadState<T> {
-    fn default() -> Self {
-        Self::Idle
     }
 }
 
