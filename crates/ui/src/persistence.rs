@@ -1,12 +1,12 @@
-//! Saving and restoring window preferences across launches: the dock layout and the
-//! theme preference.
+//! Saving and restoring window preferences across launches: the dock layout, the theme
+//! preference, and the project list.
 //!
-//! [`DockAreaState`] and [`ThemePreference`] are both `Serialize`/`Deserialize` and carry
-//! no gpui entities, so the round trip through this module is ordinary JSON on disk — no
-//! different in kind from any other config file. Dock layout saves are debounced by
-//! [`crate::workspace::Workspace`], since `DockEvent::LayoutChanged` fires on every drag
-//! frame while a panel is being resized; a theme preference change is a rare, deliberate
-//! click, so it saves immediately.
+//! [`DockAreaState`], [`ThemePreference`] and [`ProjectList`] are all `Serialize`/
+//! `Deserialize` and carry no gpui entities, so the round trip through this module is
+//! ordinary JSON on disk — no different in kind from any other config file. Dock layout
+//! saves are debounced by [`crate::workspace::Workspace`], since `DockEvent::LayoutChanged`
+//! fires on every drag frame while a panel is being resized; a theme preference change or a
+//! project being added or switched is a rare, deliberate action, so each saves immediately.
 //!
 //! A failure here is a logged inconvenience, not a crash: nothing in this module panics,
 //! and every fallible function returns a `Result` for the caller to log and move past.
@@ -15,11 +15,14 @@ use std::path::{Path, PathBuf};
 
 use gpui_component::dock::DockAreaState;
 
+use crate::project::ProjectList;
 use crate::theme_preference::ThemePreference;
 
 const APPLICATION_SUPPORT_DIR: &str = "Library/Application Support/gitr";
 const DOCK_LAYOUT_FILE: &str = "dock-layout.json";
 const THEME_PREFERENCE_FILE: &str = "theme-preference.json";
+const PROJECTS_FILE: &str = "projects.json";
+const REMOTE_CACHE_DIR: &str = "remotes";
 
 /// Where the dock layout lives for the signed-in user, or `None` if `$HOME` is unset.
 ///
@@ -109,11 +112,72 @@ pub fn load_theme_preference() -> Option<ThemePreference> {
     load_theme_preference_from(&theme_preference_path()?).ok()
 }
 
+/// Where the project list lives for the signed-in user, or `None` if `$HOME` is unset.
+/// See [`dock_layout_path`] — same directory, same not-cached reasoning.
+pub fn project_list_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join(APPLICATION_SUPPORT_DIR)
+            .join(PROJECTS_FILE),
+    )
+}
+
+/// Persists `list` to `path`, creating its parent directory if it does not exist yet.
+/// Blocking: call this from `cx.background_executor()`, never on the frame thread —
+/// except at startup, before any executor exists to spawn onto, which is the one place
+/// [`crates/gitr/src/main.rs`] calls this directly.
+pub fn save_project_list_to(path: &Path, list: &ProjectList) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string_pretty(list)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+/// Reads and parses the project list at `path`. Blocking, same shape as [`load_from`].
+pub fn load_project_list_from(path: &Path) -> anyhow::Result<ProjectList> {
+    let json = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&json)?)
+}
+
+/// Saves `list` to the user's application support directory.
+pub fn save_project_list(list: &ProjectList) -> anyhow::Result<()> {
+    let path = project_list_path().ok_or_else(|| anyhow::anyhow!("$HOME is not set"))?;
+    save_project_list_to(&path, list)
+}
+
+/// Loads the project list from the user's application support directory, if one exists
+/// and parses cleanly. Any failure — missing file, unreadable JSON, a shape from an older
+/// version — falls back to `None`, mirroring [`load`]; the caller treats that the same as
+/// an empty list, never as an error to surface.
+pub fn load_project_list() -> Option<ProjectList> {
+    load_project_list_from(&project_list_path()?).ok()
+}
+
+/// Where a remote project's bare partial clone lands, or `None` if `$HOME` is unset. See
+/// [`dock_layout_path`] — same directory, same not-cached reasoning.
+///
+/// This is a cache gitr fills and reads on its own, not a location the user ever browses
+/// or is asked to pick — [`crate::project::remote_cache_dir`] derives a specific clone's
+/// directory underneath it from the URL alone.
+pub fn remote_cache_root() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join(APPLICATION_SUPPORT_DIR)
+            .join(REMOTE_CACHE_DIR),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{Axis, px};
     use gpui_component::dock::{PanelInfo, PanelState};
+
+    use crate::project::Project;
 
     fn sample_state() -> DockAreaState {
         DockAreaState {
@@ -225,6 +289,70 @@ mod tests {
         let path = scratch_path("theme-nested-dir").join("theme-preference.json");
 
         save_theme_preference_to(&path, &ThemePreference::Light)
+            .expect("save must create its own parent directory");
+        assert!(path.exists());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    fn sample_project_list() -> ProjectList {
+        let a = Project::local(PathBuf::from("/repos/a"));
+        let b = Project::local(PathBuf::from("/repos/b"));
+        ProjectList {
+            active: Some(b.source.clone()),
+            projects: vec![a, b],
+        }
+    }
+
+    #[test]
+    fn round_trips_a_project_list_through_disk() {
+        let path = scratch_path("projects-round-trip.json");
+        let list = sample_project_list();
+
+        save_project_list_to(&path, &list).expect("save must succeed against a writable temp path");
+        let loaded = load_project_list_from(&path).expect("load must succeed right after save");
+
+        assert_eq!(loaded, list);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_missing_project_list_file_is_an_error_not_a_panic() {
+        let path = scratch_path("projects-does-not-exist.json");
+        assert!(load_project_list_from(&path).is_err());
+    }
+
+    #[test]
+    fn a_corrupt_project_list_file_is_an_error_not_a_panic() {
+        let path = scratch_path("projects-corrupt.json");
+        std::fs::write(&path, b"not json").expect("must be able to write the scratch file");
+
+        assert!(load_project_list_from(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_project_list_file_falls_back_to_an_empty_list() {
+        let missing = scratch_path("projects-fallback-missing.json");
+        assert_eq!(
+            load_project_list_from(&missing).unwrap_or_default(),
+            ProjectList::default()
+        );
+
+        let corrupt = scratch_path("projects-fallback-corrupt.json");
+        std::fs::write(&corrupt, b"{ not json").expect("must be able to write the scratch file");
+        assert_eq!(
+            load_project_list_from(&corrupt).unwrap_or_default(),
+            ProjectList::default()
+        );
+        let _ = std::fs::remove_file(&corrupt);
+    }
+
+    #[test]
+    fn saving_a_project_list_creates_missing_parent_directories() {
+        let path = scratch_path("projects-nested-dir").join("projects.json");
+
+        save_project_list_to(&path, &sample_project_list())
             .expect("save must create its own parent directory");
         assert!(path.exists());
 

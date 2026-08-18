@@ -21,34 +21,45 @@
 //! see [`install_default_layout`] for exactly how. The detail panel's half of that split
 //! can be entirely absent from the tree; [`Workspace::reveal_detail`] is what puts it back.
 //!
-//! [`Workspace`] owns the single [`RepositoryState`] this window is open on. Every
-//! `RepositoryEvent` it emits is pushed into the panels here; nothing downstream reads a
-//! repository itself.
+//! [`Workspace`] owns the single [`RepositoryState`] the window currently has open, plus
+//! the full [`ProjectList`] of every project the user has added. Only the active project
+//! ever has a live [`RepositoryState`] — switching, in [`Workspace::open_project`], drops
+//! the old one (and with it its background reads and its filesystem watcher thread)
+//! before the new one is created, so there is never a moment with two watchers running
+//! or with a frame mixing one project's history under another's name. Every
+//! `RepositoryEvent` the active repository emits is pushed into the panels here; nothing
+//! downstream reads a repository itself.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use domain::{HeadState, HistoryScope, Reference};
+use domain::{Aspect, HeadState, HistoryScope, Reference, RepositoryChange};
 use gpui::{
     Animation, AnimationExt as _, App, AppContext as _, Axis, Context, Entity, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Subscription,
-    Task, WeakEntity, Window, div, ease_in_out, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
+    ScrollHandle, Styled as _, Subscription, Task, WeakEntity, Window, div, ease_in_out, px,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Root, Sizable as _, Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dock::{DockArea, DockAreaState, DockEvent, DockItem, Panel, StackPanel, TabPanel},
     h_flex,
+    input::{InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
     notification::NotificationType,
     status_bar::StatusBar,
 };
+use vcs::process::GitRunner;
 
 use crate::{
     detail::DetailPanel,
     history::{HistoryPanel, HistoryPanelEvent},
     persistence,
+    project::{
+        Project, ProjectList, ProjectSource, RemoteProject, display_name, remote_cache_dir,
+        resolve_repository_root, validate_remote_url,
+    },
     repository::{History, HistoryFilter, LoadState, RepositoryEvent, RepositoryState},
     sidebar,
     theme_preference::ThemePreference,
@@ -104,6 +115,7 @@ struct ThemeTransition {
 /// Root view of a gitr window.
 pub struct Workspace {
     dock_area: Entity<DockArea>,
+    projects: ProjectList,
     repository: Entity<RepositoryState>,
     history_panel: Entity<HistoryPanel>,
     detail_panel: Entity<DetailPanel>,
@@ -119,15 +131,48 @@ pub struct Workspace {
     theme_transition: Option<ThemeTransition>,
     next_theme_transition_id: usize,
     last_saved_layout: Option<DockAreaState>,
+    /// The project selector's search box, above the capped, scrollable project list — see
+    /// `crates/ui/src/sidebar/selector.rs`.
+    project_search_input: Entity<InputState>,
+    /// The project selector's "paste a repository URL" field. Submitting (Enter) hands
+    /// the value to [`Self::add_project_from_url`].
+    project_url_input: Entity<InputState>,
+    /// The project selector list's own scroll position, kept across popover renders so
+    /// scrolling through a long list does not reset to the top on every keystroke in
+    /// [`Self::project_search_input`].
+    project_list_scroll: ScrollHandle,
+    /// The URL currently being cloned, if any — `crates/ui/src/sidebar/selector.rs` shows
+    /// this as an in-progress row rather than leaving the selector looking idle while a
+    /// clone (seconds, not milliseconds — see `crates/vcs/src/process/remote.rs`) runs on
+    /// `cx.background_executor()`.
+    cloning_project: Option<String>,
+    /// Whether a `synchronise` fetch for the active project is in flight, so the sidebar
+    /// can show that and refuse a second concurrent fetch for the same project.
+    synchronising: bool,
     _save_layout_task: Option<Task<()>>,
     _appearance_subscription: Subscription,
     _dock_subscription: Subscription,
     _repository_subscription: Subscription,
     _history_panel_subscription: Subscription,
+    _project_search_subscription: Subscription,
+    _project_url_subscription: Subscription,
+    _window_closed_subscription: Subscription,
 }
 
 impl Workspace {
-    pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// Builds the window on `projects.active_project()`.
+    ///
+    /// `.expect(..)` below is provably infallible, not merely assumed: the only caller,
+    /// `crates/gitr/src/main.rs`, seeds one project from the CLI argument or the working
+    /// directory whenever the persisted list it loads is empty, before this is ever
+    /// called, so `projects` always has an active project by the time it gets here.
+    ///
+    /// gitr opens exactly one window, so there is no "close this one, keep the others
+    /// running" case for it to leave open: `App::on_window_closed` firing for any window
+    /// closing is indistinguishable from *the* window closing here, and the `cx.quit()`
+    /// it calls runs the `on_app_quit` handler registered below before the process ends,
+    /// so the dock layout still gets its last save.
+    pub fn new(projects: ProjectList, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let theme_preference = theme_preference_at_startup();
         apply_theme_preference(theme_preference, window, cx);
 
@@ -138,7 +183,22 @@ impl Workspace {
             }
         });
 
-        let repository = cx.new(|cx| RepositoryState::open(path, cx));
+        let active_project = projects
+            .active_project()
+            .cloned()
+            .expect("crates/gitr/src/main.rs never opens a window on an empty project list");
+        let (active_path, watch) = repository_path_and_watch(&active_project.source);
+        let repository = cx.new(|cx| RepositoryState::open(active_path, watch, cx));
+
+        let project_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search projects"));
+        let project_url_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Add from URL — paste and press Enter")
+        });
+        let project_search_subscription =
+            cx.subscribe_in(&project_search_input, window, Self::on_project_search_event);
+        let project_url_subscription =
+            cx.subscribe_in(&project_url_input, window, Self::on_project_url_event);
 
         let dock_area =
             cx.new(|cx| DockArea::new(DOCK_AREA_ID, Some(DOCK_AREA_VERSION), window, cx));
@@ -165,10 +225,7 @@ impl Workspace {
         let (history_panel, detail_panel, detail_slot) =
             restored.unwrap_or_else(|| install_default_layout(&dock_area, window, cx));
 
-        let initial_history = repository.read(cx).history().clone();
-        let initial_detail = repository.read(cx).detail().clone();
-        history_panel.update(cx, |panel, cx| panel.set_history(initial_history, cx));
-        detail_panel.update(cx, |panel, cx| panel.set_detail(initial_detail, cx));
+        sync_panels_from_repository(&repository, &history_panel, &detail_panel, cx);
 
         let repository_subscription =
             cx.subscribe_in(&repository, window, Self::on_repository_event);
@@ -195,8 +252,11 @@ impl Workspace {
         })
         .detach();
 
+        let window_closed_subscription = cx.on_window_closed(|cx, _window_id| cx.quit());
+
         Self {
             dock_area,
+            projects,
             repository,
             history_panel,
             detail_panel,
@@ -206,11 +266,19 @@ impl Workspace {
             theme_transition: None,
             next_theme_transition_id: 0,
             last_saved_layout: None,
+            project_search_input,
+            project_url_input,
+            project_list_scroll: ScrollHandle::new(),
+            cloning_project: None,
+            synchronising: false,
             _save_layout_task: None,
             _appearance_subscription: appearance_subscription,
             _dock_subscription: dock_subscription,
             _repository_subscription: repository_subscription,
             _history_panel_subscription: history_panel_subscription,
+            _project_search_subscription: project_search_subscription,
+            _project_url_subscription: project_url_subscription,
+            _window_closed_subscription: window_closed_subscription,
         }
     }
 
@@ -429,6 +497,375 @@ impl Workspace {
             });
         }));
     }
+
+    /// Replaces the live repository with `project`'s, and nothing else: `self.projects`
+    /// must already name `project` as active by the time this runs.
+    ///
+    /// The old [`RepositoryState`] is dropped the instant `self.repository` is
+    /// reassigned — with it go its background reads, its filesystem watcher thread, and
+    /// (once `self._repository_subscription` is reassigned too) its event subscription.
+    /// [`HistoryPanel`] and [`DetailPanel`] are reset to the new repository's starting
+    /// `Loading`/`Idle` state in this same call, and the history's scope and search
+    /// filter reset to their defaults — a scope naming a branch from the old repository
+    /// would not resolve against the new one. There is no frame in which the old
+    /// project's rows, detail, or filter are still showing under the new project's name.
+    fn open_project(&mut self, project: &Project, window: &mut Window, cx: &mut Context<Self>) {
+        let (path, watch) = repository_path_and_watch(&project.source);
+
+        let repository = cx.new(|cx| RepositoryState::open(path, watch, cx));
+        sync_panels_from_repository(&repository, &self.history_panel, &self.detail_panel, cx);
+        self.history_panel
+            .update(cx, |panel, cx| panel.reset_for_new_repository(cx));
+
+        self._repository_subscription =
+            cx.subscribe_in(&repository, window, Self::on_repository_event);
+        self.repository = repository;
+    }
+
+    /// Adds `project` to the remembered list if it is not already there, makes it
+    /// active, persists the list, and — unless it was already the active project —
+    /// opens it. Used by the "open from disk" and "add from URL" flows, which may be
+    /// naming a project this list has never seen. `crates/gitr/src/main.rs` does the
+    /// equivalent add-or-activate directly against the persisted [`ProjectList`] for
+    /// `gitr <dir>`, since that happens before the window, and this method, exist.
+    fn activate_project(&mut self, project: Project, window: &mut Window, cx: &mut Context<Self>) {
+        let already_active = self.projects.active.as_ref() == Some(&project.source);
+        self.projects.add_or_activate(project.clone());
+        self.persist_projects(cx);
+
+        if !already_active {
+            self.open_project(&project, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Handles a click on one of the selector's project rows
+    /// (`crates/ui/src/sidebar/selector.rs`).
+    ///
+    /// `source` is always read off `self.projects`, so [`ProjectList::activate`] finding
+    /// nothing for it would mean the selector was built from stale data — reported rather
+    /// than silently ignored, even though nothing in this module can currently produce
+    /// that.
+    pub(crate) fn switch_to(
+        &mut self,
+        source: ProjectSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.projects.active.as_ref() == Some(&source) {
+            return;
+        }
+        let Some(project) = self.projects.activate(&source).cloned() else {
+            eprintln!("gitr: project selector chose a project no longer in the list");
+            return;
+        };
+
+        self.persist_projects(cx);
+        self.open_project(&project, window, cx);
+        cx.notify();
+    }
+
+    /// Resolves `path` to a repository root and adds it to the remembered list,
+    /// activating it. A path that does not lead to a Git repository is reported through
+    /// a notification — never a dialog, never a panic — and the list is left untouched.
+    fn add_project_from_disk(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = match resolve_repository_root(&path) {
+            Ok(root) => root,
+            Err(error) => {
+                window.push_notification((NotificationType::Error, error.to_string()), cx);
+                return;
+            }
+        };
+        self.activate_project(Project::local(root), window, cx);
+    }
+
+    /// Opens the native directory picker and, once the user chooses one, adds and
+    /// activates it through [`Self::add_project_from_disk`].
+    ///
+    /// A cancelled picker, a platform error, or a dropped channel all collapse to the
+    /// same "nothing chosen" outcome: there is nothing to add and nothing to report,
+    /// exactly like dismissing any other picker without choosing anything.
+    pub(crate) fn open_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+
+        cx.spawn_in(window, async move |workspace, window| {
+            let path = paths.await.ok()?.ok()??.into_iter().next()?;
+            let _ = workspace.update_in(window, move |workspace, window, cx| {
+                workspace.add_project_from_disk(path, window, cx);
+            });
+            Some(())
+        })
+        .detach();
+    }
+
+    /// Validates `raw_url`, then either activates an already-known project with the same
+    /// identity (see [`ProjectSource`]'s hand-written equality) or clones it fresh.
+    ///
+    /// A clone runs on `cx.background_executor()` and takes seconds, not milliseconds
+    /// (`crates/vcs/src/process/remote.rs`), so [`Self::cloning_project`] is set for its
+    /// duration and cleared in every outcome — success, failure, or this being called
+    /// again for a different URL while one is already in flight, which is refused with a
+    /// notification rather than starting a second overlapping clone. Every
+    /// [`vcs::process::RemoteError`] variant keeps `git`'s own distinguishing message
+    /// (not found, authentication required, network unavailable, ...), so the notification
+    /// this surfaces on failure never collapses those into one generic message.
+    pub(crate) fn add_project_from_url(
+        &mut self,
+        raw_url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let url = match validate_remote_url(&raw_url) {
+            Ok(url) => url,
+            Err(error) => {
+                window.push_notification((NotificationType::Error, error.to_string()), cx);
+                return;
+            }
+        };
+
+        let Some(cache_root) = persistence::remote_cache_root() else {
+            window.push_notification(
+                (
+                    NotificationType::Error,
+                    "cannot locate gitr's cache directory: $HOME is not set".to_string(),
+                ),
+                cx,
+            );
+            return;
+        };
+        let cache_dir = remote_cache_dir(&url, &cache_root);
+        let candidate_source = ProjectSource::Remote(RemoteProject {
+            url: url.clone(),
+            cache_dir: cache_dir.clone(),
+            last_synchronised: None,
+        });
+
+        if let Some(existing) = self
+            .projects
+            .projects
+            .iter()
+            .find(|project| project.source == candidate_source)
+            .cloned()
+        {
+            self.activate_project(existing, window, cx);
+            return;
+        }
+
+        if self.cloning_project.is_some() {
+            window.push_notification(
+                (
+                    NotificationType::Warning,
+                    "gitr is already cloning a project — wait for it to finish first".to_string(),
+                ),
+                cx,
+            );
+            return;
+        }
+
+        self.cloning_project = Some(url.clone());
+        cx.notify();
+
+        cx.spawn_in(window, async move |workspace, window| {
+            let clone_url = url.clone();
+            let clone_destination = cache_dir.clone();
+            let result = window
+                .background_executor()
+                .spawn(async move { GitRunner::new().clone_bare(&clone_url, &clone_destination) })
+                .await;
+
+            let _ = workspace.update_in(window, move |workspace, window, cx| {
+                workspace.cloning_project = None;
+                match result {
+                    Ok(()) => {
+                        let project = Project::remote(url.clone(), cache_dir.clone());
+                        workspace.activate_project(project, window, cx);
+                    }
+                    Err(error) => {
+                        window.push_notification(
+                            (
+                                NotificationType::Error,
+                                format!("Could not add {url}: {error}"),
+                            ),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Fetches the active project, if it is remote — a no-op otherwise, and a no-op while
+    /// a synchronise for it is already in flight.
+    ///
+    /// The fetch itself runs on `cx.background_executor()`. On success, the active
+    /// project's [`RemoteProject::last_synchronised`] is stamped with the completion
+    /// time and persisted, and the repository is reloaded so the history actually
+    /// reflects what the fetch brought in — a synchronise that updated the clone on disk
+    /// but left the window showing the pre-fetch history would defeat the point of a
+    /// manual refresh. That reload is skipped if the user switched to a different project
+    /// while the fetch was running: reloading whatever [`Self::repository`] happens to be
+    /// by then would apply a change notification to a repository the fetch never touched.
+    pub(crate) fn synchronise_active_project(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = self.projects.active_project().cloned() else {
+            return;
+        };
+        let ProjectSource::Remote(remote) = &active.source else {
+            return;
+        };
+        if self.synchronising {
+            return;
+        }
+
+        self.synchronising = true;
+        cx.notify();
+
+        let repository_root = remote.cache_dir.clone();
+        let source = active.source.clone();
+
+        cx.spawn_in(window, async move |workspace, window| {
+            let fetch_root = repository_root.clone();
+            let result = window
+                .background_executor()
+                .spawn(async move { GitRunner::new().fetch(&fetch_root) })
+                .await;
+
+            let _ = workspace.update_in(window, move |workspace, window, cx| {
+                workspace.synchronising = false;
+                match result {
+                    Ok(()) => {
+                        workspace
+                            .projects
+                            .mark_synchronised(&source, SystemTime::now());
+                        workspace.persist_projects(cx);
+                        if workspace.projects.active.as_ref() == Some(&source) {
+                            workspace.repository.update(cx, |repository, cx| {
+                                repository.reload(RepositoryChange::only(Aspect::References), cx);
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        window.push_notification(
+                            (
+                                NotificationType::Error,
+                                format!("Synchronise failed: {error}"),
+                            ),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn on_project_search_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event, InputEvent::Change) {
+            cx.notify();
+        }
+    }
+
+    fn on_project_url_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let InputEvent::PressEnter { .. } = event else {
+            return;
+        };
+        let url = input.read(cx).value().to_string();
+        self.project_url_input
+            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        if !url.trim().is_empty() {
+            self.add_project_from_url(url, window, cx);
+        }
+    }
+
+    /// Writes `self.projects` to disk on the background executor, mirroring
+    /// [`Self::set_theme_preference`]'s save: a project being added or switched is a
+    /// rare, deliberate action, so it is not debounced the way the dock layout's
+    /// frequent [`DockEvent::LayoutChanged`] is.
+    fn persist_projects(&self, cx: &mut Context<Self>) {
+        let projects = self.projects.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = persistence::save_project_list(&projects) {
+                    eprintln!("gitr: failed to save project list: {error:#}");
+                }
+            })
+            .detach();
+    }
+}
+
+/// The filesystem path `RepositoryState::open` should read `source` from, and whether it
+/// should also watch that path for outside changes.
+///
+/// A remote project's clone lives in gitr's own cache and is written only by gitr —
+/// through a clone or a synchronise fetch — so watching it would only ever observe
+/// gitr's own writes and fire a reload of a change the window already applied. Its
+/// caller relies on an explicit synchronise instead; see `RepositoryState::open`.
+fn repository_path_and_watch(source: &ProjectSource) -> (PathBuf, bool) {
+    match source {
+        ProjectSource::Local(path) => (path.clone(), true),
+        ProjectSource::Remote(remote) => (remote.cache_dir.clone(), false),
+    }
+}
+
+/// The name the title bar and the repository bar show for the window's open project.
+///
+/// Reads `projects.active_project()`'s own name rather than deriving one from
+/// `repository_path` — a live [`RepositoryState`]'s path is a remote project's cache
+/// directory, named after [`crate::project::remote_cache_dir`]'s hash, not the project's
+/// own name. `display_name(repository_path)` is only the fallback for the window somehow
+/// having no active project, which `crates/gitr/src/main.rs` already rules out before a
+/// [`Workspace`] exists (see [`Workspace::new`]'s doc comment).
+fn active_repository_name(projects: &ProjectList, repository_path: &Path) -> String {
+    projects
+        .active_project()
+        .map(|project| project.name.clone())
+        .unwrap_or_else(|| display_name(repository_path))
+}
+
+/// Pushes `repository`'s current history and detail into `history_panel` and
+/// `detail_panel`. Called right after `RepositoryState::open` — while both are still
+/// `Loading`/`Idle`, since neither background read has completed yet — so
+/// [`Workspace::new`] and [`Workspace::open_project`] start every window and every
+/// switch from that same blank slate rather than whatever the previous repository last
+/// rendered.
+fn sync_panels_from_repository(
+    repository: &Entity<RepositoryState>,
+    history_panel: &Entity<HistoryPanel>,
+    detail_panel: &Entity<DetailPanel>,
+    cx: &mut Context<Workspace>,
+) {
+    let history = repository.read(cx).history().clone();
+    let detail = repository.read(cx).detail().clone();
+    history_panel.update(cx, |panel, cx| panel.set_history(history, cx));
+    detail_panel.update(cx, |panel, cx| panel.set_detail(detail, cx));
 }
 
 /// Reads the persisted theme preference, logging and defaulting on a genuine failure to
@@ -583,12 +1020,6 @@ fn find_in_item<T: Panel>(item: &DockItem) -> Option<Entity<T>> {
     }
 }
 
-fn repository_display_name(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
 fn title_bar(
     repository_name: &str,
     head: &LoadState<HeadState>,
@@ -739,11 +1170,19 @@ impl Render for Workspace {
         let head = self.repository.read(cx).head().clone();
         let references = self.repository.read(cx).references().clone();
         let history = self.repository.read(cx).history().clone();
-        let repository_name = repository_display_name(&path);
+        let repository_name = active_repository_name(&self.projects, &path);
 
         let sheet_layer = Root::render_sheet_layer(window, cx);
         let dialog_layer = Root::render_dialog_layer(window, cx);
         let notification_layer = Root::render_notification_layer(window, cx);
+
+        let selector = sidebar::selector::SelectorInputs {
+            search_input: &self.project_search_input,
+            url_input: &self.project_url_input,
+            list_scroll: &self.project_list_scroll,
+            cloning: self.cloning_project.as_deref(),
+            synchronising: self.synchronising,
+        };
 
         div()
             .id("workspace")
@@ -768,7 +1207,8 @@ impl Render for Workspace {
                     .child(sidebar::render(
                         &references,
                         &head,
-                        &repository_name,
+                        &self.projects,
+                        selector,
                         sidebar_collapsed,
                         cx,
                     ))

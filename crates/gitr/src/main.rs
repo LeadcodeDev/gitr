@@ -1,6 +1,7 @@
-//! gitr's composition root: resolves the repository to open, then wires it into the
-//! window. A path that does not lead to a Git repository is a startup error, reported on
-//! stderr with a non-zero exit — never a panic, and never an empty window.
+//! gitr's composition root: resolves which projects the window opens on, then wires the
+//! active one into the window. A path argument that does not lead to a Git repository is
+//! a startup error, reported on stderr with a non-zero exit — never a panic, and never an
+//! empty window.
 
 use std::env;
 use std::path::PathBuf;
@@ -10,16 +11,39 @@ use domain::RepositoryError;
 use gpui::{App, AppContext};
 use gpui_component::{Root, TitleBar};
 use ui::Workspace;
+use ui::persistence;
+use ui::project::{Project, ProjectList, resolve_repository_root};
 
 fn main() -> ExitCode {
     let requested = env::args_os().nth(1).map(PathBuf::from);
-    let path = match resolve_repository_root(requested) {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("gitr: {error}");
-            return ExitCode::FAILURE;
-        }
+
+    let mut projects = project_list_at_startup();
+
+    let seed = match requested {
+        Some(dir) => Some(dir),
+        None if projects.projects.is_empty() => match env::current_dir() {
+            Ok(cwd) => Some(cwd),
+            Err(_) => {
+                eprintln!("gitr: {}", RepositoryError::Unreadable(PathBuf::from(".")));
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
     };
+
+    if let Some(start) = seed {
+        match resolve_repository_root(&start) {
+            Ok(root) => projects.add_or_activate(Project::local(root)),
+            Err(error) => {
+                eprintln!("gitr: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    if let Err(error) = persistence::save_project_list(&projects) {
+        eprintln!("gitr: failed to save project list: {error:#}");
+    }
 
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
@@ -27,10 +51,10 @@ fn main() -> ExitCode {
             gpui_component::init(cx);
             ui::init(cx);
 
-            let path = path.clone();
+            let projects = projects.clone();
             cx.spawn(async move |cx| {
                 cx.open_window(TitleBar::window_options(), |window, cx| {
-                    let workspace = cx.new(|cx| Workspace::new(path, window, cx));
+                    let workspace = cx.new(|cx| Workspace::new(projects, window, cx));
                     cx.new(|cx| Root::new(workspace, window, cx))
                 })
                 .expect("gitr cannot run without a window");
@@ -41,31 +65,19 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Resolves `requested` — the first command-line argument, or the current directory when
-/// none was given — to the root of the Git repository it names, by walking up looking for
-/// a `.git` entry the way `git` itself does.
-///
-/// A relative or symlinked path is canonicalised first: `RepositoryError`'s messages name
-/// what the user typed, but the walk itself needs an absolute path with no `..` segments
-/// to terminate correctly at the filesystem root.
-fn resolve_repository_root(requested: Option<PathBuf>) -> Result<PathBuf, RepositoryError> {
-    let start = match requested {
-        Some(path) => path,
-        None => env::current_dir().map_err(|_| RepositoryError::Unreadable(PathBuf::from(".")))?,
+/// Reads the persisted project list, logging and starting empty on a genuine failure to
+/// parse an existing file. A file that is simply absent — every first launch — is not
+/// logged: that is the expected, unremarkable case, exactly as `Workspace` treats a
+/// missing dock layout or theme preference file.
+fn project_list_at_startup() -> ProjectList {
+    let Some(path) = persistence::project_list_path() else {
+        return ProjectList::default();
     };
-
-    let canonical = start
-        .canonicalize()
-        .map_err(|_| RepositoryError::Unreadable(start.clone()))?;
-
-    let mut current = canonical.as_path();
-    loop {
-        if current.join(".git").exists() {
-            return Ok(current.to_path_buf());
-        }
-        current = match current.parent() {
-            Some(parent) => parent,
-            None => return Err(RepositoryError::NotARepository(start)),
-        };
+    if !path.exists() {
+        return ProjectList::default();
     }
+    persistence::load_project_list_from(&path).unwrap_or_else(|error| {
+        eprintln!("gitr: failed to read saved project list, starting empty: {error:#}");
+        ProjectList::default()
+    })
 }

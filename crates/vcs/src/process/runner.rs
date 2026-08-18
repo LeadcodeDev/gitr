@@ -36,6 +36,11 @@ pub enum GitProcessError {
 
 /// Runs `git` with a resolved login-shell `PATH`, so the subprocess finds the same
 /// credential helpers and tools the user's terminal would.
+///
+/// Every invocation carries `GIT_TERMINAL_PROMPT=0`. A subprocess has no controlling
+/// terminal to prompt through in the first place, so without it `git` blocks on stdin
+/// forever instead of failing — a hang with no error rather than the actionable
+/// failure a network or clone operation needs.
 pub struct GitRunner {
     path: OsString,
 }
@@ -47,11 +52,15 @@ impl GitRunner {
         }
     }
 
+    /// Runs `git` with `args` in `working_dir` and returns its output, or the reason it
+    /// did not produce any. Blocking: waits for the child process to exit. Callers on
+    /// gpui's frame thread must run this from `cx.background_executor()`.
     pub fn run(&self, working_dir: &Path, args: &[&str]) -> Result<GitOutput, GitProcessError> {
         let output = Command::new("git")
             .args(args)
             .current_dir(working_dir)
             .env("PATH", &self.path)
+            .env("GIT_TERMINAL_PROMPT", "0")
             .output()
             .map_err(GitProcessError::Spawn)?;
 
