@@ -503,7 +503,11 @@ fn duplicate_reference_targets_do_not_truncate_the_walk() {
     }
     let tip = rev_parse(dir, "HEAD");
 
-    git_at(dir, &["checkout", "-q", "-b", "side", &root.to_string()], 1_700_000_150);
+    git_at(
+        dir,
+        &["checkout", "-q", "-b", "side", &root.to_string()],
+        1_700_000_150,
+    );
     for step in 0..6 {
         commit(dir, &format!("side {step}"), 1_700_000_200 + step);
     }

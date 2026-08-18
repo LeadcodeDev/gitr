@@ -2300,6 +2300,7 @@ name = "gitr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "domain",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
@@ -8270,6 +8271,7 @@ dependencies = [
  "graph",
  "serde",
  "serde_json",
+ "tempfile",
  "vcs",
 ]
 
