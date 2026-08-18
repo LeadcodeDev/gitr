@@ -24,11 +24,12 @@ use gpui_component::{
     h_flex,
     input::{Input, InputState},
     popover::Popover,
+    progress::Progress,
     scroll::ScrollableElement as _,
     separator::Separator,
-    spinner::Spinner,
     v_flex,
 };
+use vcs::process::CloneProgress;
 
 use crate::density;
 use crate::project::{
@@ -38,14 +39,27 @@ use crate::project::{
 use crate::workspace::Workspace;
 
 /// Render-time state [`Workspace`] owns and hands to [`popover`] by reference — a plain
-/// bundle rather than five positional parameters, since every field is read, never
+/// bundle rather than six positional parameters, since every field is read, never
 /// written, from this module.
 pub(crate) struct SelectorInputs<'a> {
     pub search_input: &'a Entity<InputState>,
     pub url_input: &'a Entity<InputState>,
     pub list_scroll: &'a ScrollHandle,
-    pub cloning: Option<&'a str>,
+    pub cloning: Option<CloningStatus<'a>>,
     pub synchronising: bool,
+    /// A one-shot signal to force the popover closed on this render, set by
+    /// [`Workspace`] the instant a clone finishes, a disk import finishes, or a
+    /// different project becomes active — see [`popover`] for how it is applied and why
+    /// it is not a second "is it open" flag living beside `gpui_component`'s own.
+    pub close: bool,
+}
+
+/// The clone currently shown in the selector's cloning row, if one is in flight: the URL
+/// — kept visible however far the clone has gotten — and the most recent phase and
+/// percentage `vcs` has reported, absent until its first progress line arrives.
+pub(crate) struct CloningStatus<'a> {
+    pub url: &'a str,
+    pub progress: Option<CloneProgress>,
 }
 
 /// Wraps an arbitrary row in the [`Selectable`] every [`Popover::trigger`] requires.
@@ -182,6 +196,7 @@ pub(crate) fn popover(
         .cloned()
         .collect();
 
+    let close = inputs.close;
     let content_args = PopoverContentArgs {
         workspace,
         matches,
@@ -189,12 +204,15 @@ pub(crate) fn popover(
         search_input: inputs.search_input.clone(),
         url_input: inputs.url_input.clone(),
         list_scroll: inputs.list_scroll.clone(),
-        cloning: inputs.cloning.map(str::to_string),
+        cloning: inputs.cloning.map(|status| CloningRow {
+            url: status.url.to_string(),
+            progress: status.progress,
+        }),
     };
 
-    Popover::new("project-selector")
-        .trigger(HeaderTrigger::new(row))
-        .content(move |_, window, cx| popover_content(&content_args, window, cx))
+    let popover = Popover::new("project-selector").trigger(HeaderTrigger::new(row));
+    let popover = if close { popover.open(false) } else { popover };
+    popover.content(move |_, window, cx| popover_content(&content_args, window, cx))
 }
 
 /// Everything [`popover_content`] needs, bundled so the `Popover::content` closure that
@@ -206,7 +224,14 @@ struct PopoverContentArgs {
     search_input: Entity<InputState>,
     url_input: Entity<InputState>,
     list_scroll: ScrollHandle,
-    cloning: Option<String>,
+    cloning: Option<CloningRow>,
+}
+
+/// Owned counterpart of [`CloningStatus`], since [`PopoverContentArgs`] is moved into the
+/// `'static` closure [`Popover::content`] takes and cannot hold a borrow.
+struct CloningRow {
+    url: String,
+    progress: Option<CloneProgress>,
 }
 
 /// The popover's body: the search box, the capped and scrollable project list, and the
@@ -266,7 +291,7 @@ fn popover_content(args: &PopoverContentArgs, _window: &mut Window, cx: &mut App
                 .prefix(Icon::new(IconName::Globe).small())
                 .w_full(),
         )
-        .children(args.cloning.as_deref().map(cloning_row))
+        .children(args.cloning.as_ref().map(cloning_row))
         .into_any_element()
 }
 
@@ -373,20 +398,50 @@ fn open_from_disk_button(workspace: &WeakEntity<Workspace>) -> impl IntoElement 
         })
 }
 
-fn cloning_row(url: &str) -> impl IntoElement {
-    h_flex()
-        .items_center()
-        .gap_2()
+/// Renders the clone's URL plus, beneath it, a bar that is indeterminate until the first
+/// [`CloneProgress`] arrives or a phase reports no percentage of its own — `remote:
+/// Enumerating objects` names a count, never a share of one — and determinate the moment
+/// one does, labelled with the phase git itself is naming.
+fn cloning_row(cloning: &CloningRow) -> impl IntoElement {
+    let (label, percent, indeterminate) = match cloning.progress {
+        Some(CloneProgress {
+            phase,
+            percent: Some(percent),
+        }) => (
+            format!("{} — {percent}%", phase.label()),
+            percent as f32,
+            false,
+        ),
+        Some(CloneProgress {
+            phase,
+            percent: None,
+        }) => (phase.label().to_string(), 0., true),
+        None => ("Starting…".to_string(), 0., true),
+    };
+
+    v_flex()
+        .gap_1()
         .px_2()
         .py_1()
         .text_xs()
-        .child(Spinner::new())
         .child(
             div()
-                .flex_1()
                 .min_w_0()
                 .overflow_hidden()
                 .text_ellipsis()
-                .child(format!("Cloning {url}…")),
+                .child(format!("Cloning {}…", cloning.url)),
+        )
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Progress::new("project-clone-progress")
+                        .xsmall()
+                        .flex_1()
+                        .value(percent)
+                        .loading(indeterminate),
+                )
+                .child(div().flex_shrink_0().child(label)),
         )
 }

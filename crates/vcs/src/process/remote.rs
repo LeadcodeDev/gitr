@@ -11,7 +11,9 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 
+use super::clone_progress::{CloneProgress, ProgressLineSplitter, parse_progress_line};
 use super::runner::{GitProcessError, GitRunner};
 
 const PARTIAL_CLONE_SUFFIX: &str = ".gitr-partial";
@@ -148,6 +150,43 @@ impl GitRunner {
     ///
     /// Blocking: runs `git clone` to completion. Call from `cx.background_executor()`.
     pub fn clone_bare(&self, url: &str, destination: &Path) -> Result<(), RemoteError> {
+        self.clone_bare_internal(url, destination, None)
+    }
+
+    /// Clones exactly like [`Self::clone_bare`], reporting each phase and percentage
+    /// change `git` prints along the way through `progress`.
+    ///
+    /// A [`Sender`] rather than a callback: this call already runs inside whatever
+    /// closure a caller handed to `cx.background_executor().spawn()`, so a callback would
+    /// need the same `Send + 'static` shape a channel already has for free, with none of
+    /// the upside — `crates/ui/src/repository/state.rs`'s filesystem watcher already
+    /// crosses from a blocking background thread into gpui this way, and its caller
+    /// already knows how to drain one, so `crates/ui/src/workspace.rs` reuses that same
+    /// shape rather than inventing a second one next to it. It also keeps this crate
+    /// ignorant of gpui: a `Sender` is a plain channel that does not care who, if anyone,
+    /// is still receiving.
+    ///
+    /// Every update is best-effort: a send that fails because the receiving end has
+    /// already been dropped is not a reason to fail or slow the clone itself, so it is
+    /// silently discarded here — the clone's own success or failure is still reported
+    /// through the returned `Result`, unaffected by whether anyone was watching.
+    ///
+    /// Blocking: runs `git clone` to completion. Call from `cx.background_executor()`.
+    pub fn clone_bare_with_progress(
+        &self,
+        url: &str,
+        destination: &Path,
+        progress: Sender<CloneProgress>,
+    ) -> Result<(), RemoteError> {
+        self.clone_bare_internal(url, destination, Some(progress))
+    }
+
+    fn clone_bare_internal(
+        &self,
+        url: &str,
+        destination: &Path,
+        progress: Option<Sender<CloneProgress>>,
+    ) -> Result<(), RemoteError> {
         if destination.exists() {
             return Err(RemoteError::DestinationExists(destination.to_path_buf()));
         }
@@ -168,8 +207,20 @@ impl GitRunner {
         })?;
 
         let temp_display = temp.to_string_lossy().into_owned();
-        let args = ["clone", "--bare", "--filter=blob:none", url, &temp_display];
-        if let Err(error) = self.run(parent, &args) {
+        let args = [
+            "clone",
+            "--bare",
+            "--filter=blob:none",
+            "--progress",
+            url,
+            &temp_display,
+        ];
+        let outcome = match progress {
+            Some(sender) => self.run_clone_streaming(parent, &args, &sender),
+            None => self.run(parent, &args).map(|_| ()),
+        };
+
+        if let Err(error) = outcome {
             let cause = classify(error);
             return Err(match remove_if_present(&temp) {
                 Ok(()) => cause,
@@ -185,6 +236,26 @@ impl GitRunner {
             path: destination.to_path_buf(),
             source,
         })
+    }
+
+    /// Reassembles `git`'s `\r`-and-`\n`-delimited progress lines out of the raw stderr
+    /// chunks [`GitRunner::run_with_stderr_chunks`] hands over as they arrive, and sends
+    /// every one [`parse_progress_line`] recognises.
+    fn run_clone_streaming(
+        &self,
+        working_dir: &Path,
+        args: &[&str],
+        progress: &Sender<CloneProgress>,
+    ) -> Result<(), GitProcessError> {
+        let mut splitter = ProgressLineSplitter::new();
+        self.run_with_stderr_chunks(working_dir, args, |chunk| {
+            for line in splitter.feed(chunk) {
+                if let Some(update) = parse_progress_line(&line) {
+                    let _ = progress.send(update);
+                }
+            }
+        })
+        .map(|_| ())
     }
 
     /// Updates `repository`, a bare clone previously produced by [`GitRunner::clone_bare`].
