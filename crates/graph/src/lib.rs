@@ -8,6 +8,8 @@
 //! commits, the same placement algorithm yields 258 lanes on a date-ordered walk and 20
 //! on a topologically ordered one.
 
+pub mod layout;
 pub mod model;
 
+pub use layout::layout;
 pub use model::{GraphLayout, GraphRow, Lane, LaneColor, PALETTE_SIZE, Segment};
