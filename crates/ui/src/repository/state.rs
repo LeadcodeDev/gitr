@@ -14,7 +14,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Mutex;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use domain::{
@@ -31,12 +33,14 @@ use super::model::{
     CommitDetail, History, HistoryFilter, LoadState, ReferenceIndex, RepositoryEvent,
 };
 
-/// How long the watch pump blocks on one receive before releasing the background-pool
-/// thread it borrowed and checking again. Bounds a poll's worst-case thread occupancy
-/// instead of blocking a shared thread for the life of the entity; the cost is up to this
-/// much latency between a filesystem change and the reload it causes, on top of the
-/// watcher's own 200 ms debounce.
-const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(150);
+/// How often the watch task looks for a change the receiving thread has parked for it.
+///
+/// The wait is a `gpui` timer, which yields, never a blocking receive. An earlier version
+/// awaited a `recv_timeout` on the executor instead, and that call landed on the frame
+/// thread: it held the main queue for 150 ms out of every 150 ms, and the window never
+/// opened at all. Nothing on an executor may block, which is the same rule the whole crate
+/// is built on.
+const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct RepositoryState {
     path: PathBuf,
@@ -315,23 +319,29 @@ impl RepositoryState {
                 return;
             }
 
-            let mut receiver = receiver;
+            let mailbox = Arc::new(Mutex::new(WatchMailbox::default()));
+            thread::spawn({
+                let mailbox = Arc::clone(&mailbox);
+                move || pump_changes(receiver, mailbox)
+            });
+
             loop {
-                let (change, returned, disconnected) = cx
-                    .background_executor()
-                    .spawn(recv_next_change(receiver))
-                    .await;
-                receiver = returned;
-                if disconnected {
+                cx.background_executor().timer(WATCH_POLL_INTERVAL).await;
+
+                let collected = match mailbox.lock() {
+                    Ok(mut mailbox) => (mailbox.pending.take(), mailbox.disconnected),
+                    Err(_) => return,
+                };
+
+                if let Some(change) = collected.0
+                    && this
+                        .update(cx, |state, cx| state.reload(change, cx))
+                        .is_err()
+                {
                     return;
                 }
-                let Some(change) = change else {
-                    continue;
-                };
-                if this
-                    .update(cx, |state, cx| state.reload(change, cx))
-                    .is_err()
-                {
+
+                if collected.1 {
                     return;
                 }
             }
@@ -383,26 +393,34 @@ pub fn read_commit_detail(path: &Path, id: ObjectId) -> Result<CommitDetail, Str
     Ok(CommitDetail { commit, patch })
 }
 
-/// Drains every change already queued behind the first one, coalescing them with
-/// [`RepositoryChange::merge`] before handing the batch back — a burst of ref, index and
-/// lock-file writes from one `git` command becomes one reload, not several.
-async fn recv_next_change(
-    receiver: mpsc::Receiver<RepositoryChange>,
-) -> (
-    Option<RepositoryChange>,
-    mpsc::Receiver<RepositoryChange>,
-    bool,
-) {
-    match receiver.recv_timeout(WATCH_POLL_INTERVAL) {
-        Ok(first) => {
-            let mut change = first;
-            while let Ok(next) = receiver.try_recv() {
-                change = change.merge(next);
-            }
-            (Some(change), receiver, false)
-        }
-        Err(RecvTimeoutError::Timeout) => (None, receiver, false),
-        Err(RecvTimeoutError::Disconnected) => (None, receiver, true),
+/// What the receiving thread parks for the watch task to collect.
+///
+/// `pending` coalesces with [`RepositoryChange::merge`], so a burst of ref, index and
+/// lock-file writes from one `git` command becomes one reload rather than several, however
+/// many arrive between two polls.
+#[derive(Default)]
+struct WatchMailbox {
+    pending: Option<RepositoryChange>,
+    disconnected: bool,
+}
+
+/// Blocks on `receiver` for the life of the watch, on a thread of its own.
+///
+/// A dedicated thread rather than an executor task: `recv` blocks indefinitely, and gpui's
+/// executors must never be blocked. The thread ends when the sender closes, which is what
+/// dropping the watch guard does, so nothing else has to signal it.
+fn pump_changes(receiver: mpsc::Receiver<RepositoryChange>, mailbox: Arc<Mutex<WatchMailbox>>) {
+    while let Ok(change) = receiver.recv() {
+        let Ok(mut mailbox) = mailbox.lock() else {
+            return;
+        };
+        mailbox.pending = Some(match mailbox.pending {
+            Some(existing) => existing.merge(change),
+            None => change,
+        });
+    }
+    if let Ok(mut mailbox) = mailbox.lock() {
+        mailbox.disconnected = true;
     }
 }
 
