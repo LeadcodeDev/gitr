@@ -1,23 +1,25 @@
-//! Root view of a gitr window: title bar, sidebar, centre/right dock and status bar.
+//! Root view of a gitr window: title bar, sidebar, centre split and status bar.
 //!
 //! ```text
 //! ┌─ TitleBar : gitr — <repo> · <branch> ───────────────────── [theme ▾] ────┐
-//! ├───────────────┬───────────────────────────────────────┬────────────────┤
-//! │ [repo ▾]      │ centre dock: HistoryPanel              │ right dock:    │
-//! │ ▸ Working     │                                        │ DetailPanel    │
-//! │ ▾ Branches    │                                        │                │
-//! │ ▸ Remotes     │                                        │                │
-//! │ ▸ Tags        │                                        │                │
-//! │ ▸ Stashes     │                                        │                │
-//! ├───────────────┴───────────────────────────────────────┴────────────────┤
+//! ├───────────────┬──────────────────────────────┬──────────────────────────┤
+//! │ [repo ▾]      │ centre split: HistoryPanel    │ DetailPanel              │
+//! │ ▸ Working     │                               │                         │
+//! │ ▾ Branches    │                               │                         │
+//! │ ▸ Remotes     │                               │                         │
+//! │ ▸ Tags        │                               │                         │
+//! │ ▸ Stashes     │                               │                         │
+//! ├───────────────┴──────────────────────────────┴──────────────────────────┤
 //! │ StatusBar : N commits                                                    │
 //! └───────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! The sidebar is plain window chrome, laid out beside [`DockArea`] rather than inside
 //! it as a left dock: it is permanent navigation, not a panel a user drags or closes. The
-//! dock only ever owns the centre and right placements here — see
-//! [`install_default_layout`] for exactly where the history and detail panels plug in.
+//! dock's only placement here is the centre, holding [`HistoryPanel`] and [`DetailPanel`]
+//! as siblings of one horizontal [`DockItem::Split`] rather than as a dock and a sidecar —
+//! see [`install_default_layout`] for exactly how. The detail panel's half of that split
+//! can be entirely absent from the tree; [`Workspace::reveal_detail`] is what puts it back.
 //!
 //! [`Workspace`] owns the single [`RepositoryState`] this window is open on. Every
 //! `RepositoryEvent` it emits is pushed into the panels here; nothing downstream reads a
@@ -29,14 +31,14 @@ use std::time::Duration;
 
 use domain::{HeadState, HistoryScope, Reference};
 use gpui::{
-    Animation, AnimationExt as _, App, AppContext as _, Context, Edges, Entity, Hsla,
+    Animation, AnimationExt as _, App, AppContext as _, Axis, Context, Entity, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Subscription,
     Task, WeakEntity, Window, div, ease_in_out, px,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Root, Sizable as _, Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    dock::{DockArea, DockAreaState, DockEvent, DockItem, Panel},
+    dock::{DockArea, DockAreaState, DockEvent, DockItem, Panel, StackPanel, TabPanel},
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
     notification::NotificationType,
@@ -57,16 +59,29 @@ const DOCK_AREA_ID: &str = "gitr-dock";
 /// Bumping this invalidates a layout persisted against a different default — see
 /// [`install_default_layout`]. Bumped from `1` to `2` when the centre and bottom docks
 /// started holding [`HistoryPanel`] and [`DetailPanel`] instead of the placeholder seam
-/// panels, and from `2` to `3` when [`DetailPanel`] moved from the bottom dock to the
-/// right dock: a layout persisted against either older default must not silently restore
-/// the detail panel to the bottom.
-pub(crate) const DOCK_AREA_VERSION: usize = 3;
+/// panels, from `2` to `3` when [`DetailPanel`] moved from the bottom dock to the right
+/// dock, and from `3` to `4` when the right dock was replaced by a horizontal split in the
+/// centre. A `3` file has no `right_dock` for the new default to read: restoring it as-is
+/// would leave [`DetailPanel`] absent from the centre with nothing left to reveal it,
+/// silently reproducing a single-panel history view instead of the sibling split. The
+/// version gate below never attempts that load at all.
+pub(crate) const DOCK_AREA_VERSION: usize = 4;
 
-/// Width of the right dock holding [`DetailPanel`]. A commit's metadata header reads
-/// as a handful of label/value rows regardless of width, but the diff beneath it is
-/// prose-like — 480px is narrow enough to keep the history table's own columns
-/// comfortable next to it, wide enough that an 80-column diff line doesn't wrap.
+/// Starting width of the split's detail child, and the width it is restored to on
+/// reveal. A commit's metadata header reads as a handful of label/value rows regardless
+/// of width, but the diff beneath it is prose-like — 480px is narrow enough to keep the
+/// history table's own columns comfortable next to it, wide enough that an 80-column
+/// diff line doesn't wrap.
 const DETAIL_DOCK_WIDTH: f32 = 480.;
+
+/// What [`install_default_layout`] and [`restore_panels`] hand back to
+/// [`Workspace::new`]: both content panels, plus the detail panel's tab group when it
+/// is currently attached to the centre split.
+type WorkspacePanels = (
+    Entity<HistoryPanel>,
+    Entity<DetailPanel>,
+    Option<Entity<TabPanel>>,
+);
 
 const SAVE_DEBOUNCE: Duration = Duration::from_secs(10);
 
@@ -92,6 +107,13 @@ pub struct Workspace {
     repository: Entity<RepositoryState>,
     history_panel: Entity<HistoryPanel>,
     detail_panel: Entity<DetailPanel>,
+    /// The detail panel's tab group inside the centre split, if currently attached.
+    ///
+    /// [`StackPanel`] exposes no way to ask whether a given panel is one of its
+    /// children, so this is the only record of it. Every place that adds or removes
+    /// the tab group updates this in the same call, which is what keeps a second,
+    /// independently-drifting notion of "is it visible" from ever existing.
+    detail_slot: Option<Entity<TabPanel>>,
     sidebar_collapsed: bool,
     theme_preference: ThemePreference,
     theme_transition: Option<ThemeTransition>,
@@ -121,15 +143,14 @@ impl Workspace {
         let dock_area =
             cx.new(|cx| DockArea::new(DOCK_AREA_ID, Some(DOCK_AREA_VERSION), window, cx));
 
-        let mut restored_panels = None;
+        let mut restored = None;
         if let Some(state) = persistence::load()
             && state.version == Some(DOCK_AREA_VERSION)
         {
             match dock_area.update(cx, |area, cx| area.load(state, window, cx)) {
                 Ok(()) => {
-                    restored_panels = locate_panel::<HistoryPanel>(&dock_area, cx)
-                        .zip(locate_panel::<DetailPanel>(&dock_area, cx));
-                    if restored_panels.is_none() {
+                    restored = restore_panels(&dock_area, window, cx);
+                    if restored.is_none() {
                         eprintln!(
                             "gitr: restored dock layout is missing a panel this version installs, using the default"
                         );
@@ -141,8 +162,8 @@ impl Workspace {
             }
         }
 
-        let (history_panel, detail_panel) =
-            restored_panels.unwrap_or_else(|| install_default_layout(&dock_area, window, cx));
+        let (history_panel, detail_panel, detail_slot) =
+            restored.unwrap_or_else(|| install_default_layout(&dock_area, window, cx));
 
         let initial_history = repository.read(cx).history().clone();
         let initial_detail = repository.read(cx).detail().clone();
@@ -179,6 +200,7 @@ impl Workspace {
             repository,
             history_panel,
             detail_panel,
+            detail_slot,
             sidebar_collapsed: false,
             theme_preference,
             theme_transition: None,
@@ -297,7 +319,7 @@ impl Workspace {
         &mut self,
         _panel: &Entity<HistoryPanel>,
         event: &HistoryPanelEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
@@ -305,12 +327,78 @@ impl Workspace {
                 self.repository
                     .update(cx, |repository, cx| repository.select(Some(*id), cx));
             }
+            HistoryPanelEvent::DoubleClicked(id) => {
+                self.repository
+                    .update(cx, |repository, cx| repository.select(Some(*id), cx));
+                self.reveal_detail(window, cx);
+            }
             HistoryPanelEvent::FilterChanged(filter) => {
                 self.repository.update(cx, |repository, cx| {
                     repository.set_filter(filter.clone(), cx)
                 });
             }
         }
+    }
+
+    /// Reattaches the detail panel's tab group to the centre split if it is currently
+    /// absent, and does nothing if it is already attached — a double click on a
+    /// commit while the detail panel is already showing must never resize or flicker
+    /// it, only select.
+    fn reveal_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.detail_slot.is_some() {
+            return;
+        }
+
+        let Some(content_split) = center_split(&self.dock_area, cx) else {
+            eprintln!("gitr: workspace centre is not a split, cannot reveal the detail panel");
+            return;
+        };
+
+        let weak_dock_area = self.dock_area.downgrade();
+        let detail_item = DockItem::tab(self.detail_panel.clone(), &weak_dock_area, window, cx);
+        let detail_tab_panel = tab_panel_view(&detail_item);
+
+        content_split.update(cx, |split, cx| {
+            split.add_panel(
+                detail_item.view(),
+                Some(px(DETAIL_DOCK_WIDTH)),
+                weak_dock_area,
+                window,
+                cx,
+            );
+        });
+
+        self.detail_slot = Some(detail_tab_panel);
+    }
+
+    /// Detaches the detail panel from the centre split, giving its width back to the
+    /// history.
+    ///
+    /// Removal rather than collapsing: [`StackPanel`] gates a child's width on
+    /// [`Panel::visible`], which [`TabPanel`] derives from its children and never from its
+    /// own collapsed flag, so a collapsed panel keeps its column and merely empties it.
+    fn hide_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(slot) = self.detail_slot.take() else {
+            return;
+        };
+        let Some(content_split) = center_split(&self.dock_area, cx) else {
+            self.detail_slot = Some(slot);
+            eprintln!("gitr: workspace centre is not a split, cannot hide the detail panel");
+            return;
+        };
+
+        content_split.update(cx, |split, cx| {
+            split.remove_panel(Arc::new(slot), window, cx);
+        });
+    }
+
+    fn toggle_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.detail_slot.is_some() {
+            self.hide_detail(window, cx);
+        } else {
+            self.reveal_detail(window, cx);
+        }
+        cx.notify();
     }
 
     fn schedule_save(
@@ -371,38 +459,102 @@ fn apply_theme_preference(preference: ThemePreference, window: &mut Window, cx: 
     }
 }
 
-/// Builds the default centre/right layout — a [`HistoryPanel`] tab in the centre and a
-/// [`DetailPanel`] tab in the right dock — and hands both back so [`Workspace`] always
-/// has a handle to push repository state into, whether this ran because no layout was
-/// saved yet or because a saved one turned out not to contain them.
+/// Builds the default centre layout — [`HistoryPanel`] and [`DetailPanel`] as siblings of
+/// one horizontal [`DockItem::Split`], the detail child starting at [`DETAIL_DOCK_WIDTH`]
+/// — and hands back both content panels plus the detail panel's tab group, so
+/// [`Workspace`] always has a handle to push repository state into and to reattach on a
+/// later reveal.
 fn install_default_layout(
     dock_area: &Entity<DockArea>,
     window: &mut Window,
     cx: &mut App,
-) -> (Entity<HistoryPanel>, Entity<DetailPanel>) {
+) -> WorkspacePanels {
     let weak_dock_area = dock_area.downgrade();
 
     let history_panel = cx.new(|cx| HistoryPanel::new(window, cx));
     let detail_panel = cx.new(|cx| DetailPanel::new(window, cx));
 
-    let center = DockItem::tab(history_panel.clone(), &weak_dock_area, window, cx);
-    let right = DockItem::tab(detail_panel.clone(), &weak_dock_area, window, cx);
+    let history_item = DockItem::tab(history_panel.clone(), &weak_dock_area, window, cx);
+    let detail_item = DockItem::tab(detail_panel.clone(), &weak_dock_area, window, cx);
+    let detail_tab_panel = tab_panel_view(&detail_item);
+
+    let center = DockItem::split_with_sizes(
+        Axis::Horizontal,
+        vec![history_item, detail_item],
+        vec![None, Some(px(DETAIL_DOCK_WIDTH))],
+        &weak_dock_area,
+        window,
+        cx,
+    );
 
     dock_area.update(cx, |area, cx| {
         area.set_version(DOCK_AREA_VERSION, window, cx);
         area.set_center(center, window, cx);
-        area.set_right_dock(right, Some(px(DETAIL_DOCK_WIDTH)), true, window, cx);
-        area.set_dock_collapsible(
-            Edges {
-                right: true,
-                ..Default::default()
-            },
-            window,
-            cx,
-        );
     });
 
-    (history_panel, detail_panel)
+    (history_panel, detail_panel, Some(detail_tab_panel))
+}
+
+/// Locates both panels inside a freshly restored `dock_area`.
+///
+/// [`HistoryPanel`] must be present in every layout this version writes, so its absence
+/// means the file predates this shape or was corrupted — the caller falls back to
+/// [`install_default_layout`] in that case. [`DetailPanel`] legitimately may not be: a
+/// layout saved while it was hidden persists a one-child split, and that is not a
+/// failure. When it is missing, a fresh [`DetailPanel`] is created — unattached, ready
+/// to be wired into the split the next time [`Workspace::reveal_detail`] runs.
+fn restore_panels(
+    dock_area: &Entity<DockArea>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<WorkspacePanels> {
+    let history_panel = locate_panel::<HistoryPanel>(dock_area, cx)?;
+
+    let center = dock_area.read(cx).center().clone();
+    let (detail_panel, detail_slot) = match find_tab_panel::<DetailPanel>(&center) {
+        Some((tab_panel, detail_panel)) => (detail_panel, Some(tab_panel)),
+        None => (cx.new(|cx| DetailPanel::new(window, cx)), None),
+    };
+
+    Some((history_panel, detail_panel, detail_slot))
+}
+
+/// The dock area's centre as a [`StackPanel`], if it currently holds one.
+///
+/// Every centre this module installs or restores is a [`DockItem::Split`]; `None`
+/// only guards against a future change installing something else there instead of
+/// panicking on it.
+fn center_split(dock_area: &Entity<DockArea>, cx: &App) -> Option<Entity<StackPanel>> {
+    match dock_area.read(cx).center() {
+        DockItem::Split { view, .. } => Some(view.clone()),
+        _ => None,
+    }
+}
+
+/// The [`TabPanel`] a [`DockItem::tab`] call wraps its panel in.
+///
+/// Infallible for every value this module builds: [`DockItem::tab`] always returns
+/// `Self::Tabs`, never another variant.
+fn tab_panel_view(item: &DockItem) -> Entity<TabPanel> {
+    match item {
+        DockItem::Tabs { view, .. } => view.clone(),
+        _ => unreachable!("DockItem::tab always returns DockItem::Tabs"),
+    }
+}
+
+/// Finds `T` and the [`TabPanel`] tab group wrapping it inside `item`.
+///
+/// [`find_in_item`] returns only the leaf; reattaching a removed tab group to a
+/// [`StackPanel`] needs the wrapper itself, which this recurses down to instead.
+fn find_tab_panel<T: Panel>(item: &DockItem) -> Option<(Entity<TabPanel>, Entity<T>)> {
+    match item {
+        DockItem::Tabs { view, items, .. } => items
+            .iter()
+            .find_map(|panel| panel.view().downcast::<T>().ok())
+            .map(|panel| (view.clone(), panel)),
+        DockItem::Split { items, .. } => items.iter().find_map(find_tab_panel),
+        DockItem::Panel { .. } | DockItem::Tiles { .. } => None,
+    }
 }
 
 /// Finds the first `T` panel anywhere in `dock_area`'s docks, regardless of which one a
@@ -441,6 +593,7 @@ fn title_bar(
     repository_name: &str,
     head: &LoadState<HeadState>,
     sidebar_collapsed: bool,
+    detail_visible: bool,
     theme_preference: ThemePreference,
     cx: &mut Context<Workspace>,
 ) -> TitleBar {
@@ -479,7 +632,26 @@ fn title_bar(
         .child(
             h_flex()
                 .items_center()
+                .gap_1()
                 .pr_2()
+                .child(
+                    Button::new("toggle-detail")
+                        .ghost()
+                        .small()
+                        .icon(if detail_visible {
+                            IconName::PanelRightClose
+                        } else {
+                            IconName::PanelRightOpen
+                        })
+                        .tooltip(if detail_visible {
+                            "Hide commit detail"
+                        } else {
+                            "Show commit detail"
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_detail(window, cx);
+                        })),
+                )
                 .child(theme_preference_control(theme_preference, cx)),
         )
 }
@@ -583,6 +755,7 @@ impl Render for Workspace {
                 &repository_name,
                 &head,
                 sidebar_collapsed,
+                self.detail_slot.is_some(),
                 self.theme_preference,
                 cx,
             ))
@@ -606,5 +779,81 @@ impl Render for Workspace {
             .children(sheet_layer)
             .children(dialog_layer)
             .children(notification_layer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SHOWN_CENTER: &str = r#"{
+        "version": 4,
+        "center": {
+            "panel_name": "StackPanel",
+            "children": [
+                {
+                    "panel_name": "TabPanel",
+                    "children": [
+                        { "panel_name": "HistoryPanel", "children": [], "info": { "panel": null } }
+                    ],
+                    "info": { "tabs": { "active_index": 0 } }
+                },
+                {
+                    "panel_name": "TabPanel",
+                    "children": [
+                        { "panel_name": "DetailPanel", "children": [], "info": { "panel": null } }
+                    ],
+                    "info": { "tabs": { "active_index": 0 } }
+                }
+            ],
+            "info": { "stack": { "sizes": [820.0, 480.0], "axis": 0 } }
+        }
+    }"#;
+
+    const HIDDEN_CENTER: &str = r#"{
+        "version": 4,
+        "center": {
+            "panel_name": "StackPanel",
+            "children": [
+                {
+                    "panel_name": "TabPanel",
+                    "children": [
+                        { "panel_name": "HistoryPanel", "children": [], "info": { "panel": null } }
+                    ],
+                    "info": { "tabs": { "active_index": 0 } }
+                }
+            ],
+            "info": { "stack": { "sizes": [1300.0], "axis": 0 } }
+        }
+    }"#;
+
+    #[test]
+    fn a_layout_saved_with_the_detail_panel_visible_deserializes_into_a_two_child_split() {
+        let state: DockAreaState = serde_json::from_str(SHOWN_CENTER).unwrap();
+
+        assert_eq!(state.version, Some(DOCK_AREA_VERSION));
+        assert_eq!(state.center.panel_name, "StackPanel");
+        assert_eq!(state.center.children.len(), 2);
+        assert_eq!(
+            state.center.children[0].children[0].panel_name,
+            "HistoryPanel"
+        );
+        assert_eq!(
+            state.center.children[1].children[0].panel_name,
+            "DetailPanel"
+        );
+    }
+
+    #[test]
+    fn a_layout_saved_with_the_detail_panel_hidden_deserializes_into_a_one_child_split() {
+        let state: DockAreaState = serde_json::from_str(HIDDEN_CENTER).unwrap();
+
+        assert_eq!(state.version, Some(DOCK_AREA_VERSION));
+        assert_eq!(state.center.panel_name, "StackPanel");
+        assert_eq!(state.center.children.len(), 1);
+        assert_eq!(
+            state.center.children[0].children[0].panel_name,
+            "HistoryPanel"
+        );
     }
 }
