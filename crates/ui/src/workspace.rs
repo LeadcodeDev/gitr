@@ -462,7 +462,7 @@ fn title_bar(
                 .child(
                     Button::new("toggle-sidebar")
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(if sidebar_collapsed {
                             IconName::PanelLeftOpen
                         } else {
@@ -476,7 +476,12 @@ fn title_bar(
                 )
                 .child(div().text_sm().child(title)),
         )
-        .child(theme_preference_control(theme_preference, cx))
+        .child(
+            h_flex()
+                .items_center()
+                .pr_2()
+                .child(theme_preference_control(theme_preference, cx)),
+        )
 }
 
 /// The title bar's theme control: a button whose icon is the active preference's own
@@ -497,7 +502,7 @@ fn theme_preference_control(
 
     Button::new("theme-preference")
         .ghost()
-        .xsmall()
+        .small()
         .icon(preference.icon())
         .tooltip(format!("Theme: {}", preference.label()))
         .dropdown_menu(move |menu, _, _| {

@@ -17,15 +17,22 @@ use super::format::DiffLineRanges;
 const LIGHT_ADDITION_BACKGROUND: u32 = 0xdafbe1;
 const LIGHT_DELETION_BACKGROUND: u32 = 0xffebe9;
 
-/// Catppuccin Frappé's diff-addition syntax colour (`#a6d189`) sits at contrast ratio
-/// 1.56:1 against [`LIGHT_ADDITION_BACKGROUND`] — pale-on-pale, unreadable. This is a
-/// desaturated dark green chosen for at least 4.5:1 (WCAG AA) against that same syntax
-/// colour instead, so additions stay legible once the theme switches to dark.
-const DARK_ADDITION_BACKGROUND: u32 = 0x0f3d1f;
+/// A tint has to clear two bars, and only one of them is legibility.
+///
+/// The light pair is unreadable under Catppuccin Frappé — its addition syntax colour
+/// `#a6d189` sits at 1.56:1 against [`LIGHT_ADDITION_BACKGROUND`], pale on pale. But an
+/// earlier dark green picked purely for legibility against that text landed at 1.00:1
+/// against Frappé's own `#303446` background: identical luminance, so the band was
+/// invisible and the tint may as well not have been drawn. This value clears both — 1.58:1
+/// against the background so the band reads, 4.50:1 under the text so the code stays
+/// legible on it.
+const DARK_ADDITION_BACKGROUND: u32 = 0x355a40;
 
-/// Mirrors [`DARK_ADDITION_BACKGROUND`]'s reasoning for Catppuccin Frappé's
-/// diff-deletion syntax colour (`#e78284`, 2.31:1 against [`LIGHT_DELETION_BACKGROUND`]).
-const DARK_DELETION_BACKGROUND: u32 = 0x3c0d13;
+/// Mirrors [`DARK_ADDITION_BACKGROUND`]'s two-bar reasoning for Frappé's deletion syntax
+/// colour `#e78284`: 1.30:1 against the background, 3.57:1 under the text. Red text is
+/// lighter than green here, so the two bars pull harder against each other and this sits
+/// where they meet.
+const DARK_DELETION_BACKGROUND: u32 = 0x5f3c45;
 
 pub(super) struct LineBackgrounds {
     pub added: Hsla,
