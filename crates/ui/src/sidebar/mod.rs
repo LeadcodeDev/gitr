@@ -9,27 +9,27 @@
 //! does not load working-tree changes or stashes yet, so there is nothing real to show.
 
 pub mod branch_tree;
+pub(crate) mod selector;
 pub mod tree;
 
 use domain::{HeadState, Reference};
-use gpui::{App, Context, IntoElement, ParentElement as _, Styled as _, WeakEntity, div};
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, StyledExt as _,
-    menu::{DropdownMenu as _, PopupMenuItem},
-    sidebar::{Sidebar, SidebarHeader},
-};
+use gpui::{Context, WeakEntity};
+use gpui_component::{IconName, sidebar::Sidebar};
 
 use crate::{
+    project::ProjectList,
     repository::{LoadState, ReferenceIndex},
     workspace::Workspace,
 };
 
+use selector::SelectorInputs;
 use tree::SidebarTreeItem;
 
 pub(crate) fn render(
     references: &LoadState<ReferenceIndex>,
     head: &LoadState<HeadState>,
-    repository_name: &str,
+    projects: &ProjectList,
+    selector: SelectorInputs<'_>,
     collapsed: bool,
     cx: &mut Context<Workspace>,
 ) -> Sidebar<SidebarTreeItem> {
@@ -50,46 +50,8 @@ pub(crate) fn render(
 
     Sidebar::new("repository-sidebar")
         .collapsed(collapsed)
-        .header(repository_header(cx, repository_name, collapsed))
+        .header(selector::popover(projects, selector, collapsed, cx))
         .children(items)
-}
-
-/// The repository selector, keeping the shape a future multi-repository window will
-/// need. It lists exactly the one open repository, always checked: there is nothing
-/// else to switch to yet, so no `on_click` pretends otherwise.
-fn repository_header(cx: &App, repository_name: &str, collapsed: bool) -> impl IntoElement {
-    let name = repository_name.to_string();
-
-    let mut header = SidebarHeader::new().child(
-        div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size_8()
-            .flex_shrink_0()
-            .rounded(cx.theme().radius)
-            .bg(cx.theme().accent)
-            .text_color(cx.theme().accent_foreground)
-            .child(Icon::new(IconName::FolderOpen)),
-    );
-
-    if !collapsed {
-        header = header
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_sm()
-                    .font_medium()
-                    .child(name.clone()),
-            )
-            .child(Icon::new(IconName::ChevronsUpDown).size_4().flex_shrink_0());
-    }
-
-    header
-        .dropdown_menu(move |menu, _, _| menu.item(PopupMenuItem::new(name.clone()).checked(true)))
 }
 
 fn working_item() -> SidebarTreeItem {

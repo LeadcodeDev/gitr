@@ -59,7 +59,14 @@ pub struct RepositoryState {
 }
 
 impl RepositoryState {
-    pub fn open(path: PathBuf, cx: &mut Context<Self>) -> Self {
+    /// Opens `path` and starts its three initial reads. `watch` gates whether a
+    /// filesystem watcher is also started: gitr's own remote cache is written only by
+    /// gitr itself (a clone, or a synchronise fetch), so a watcher on it would only ever
+    /// observe gitr's own writes and fire a reload gitr had already applied — a remote
+    /// project's caller passes `false` and relies on an explicit synchronise instead. A
+    /// local repository can change from outside gitr at any time, so its caller passes
+    /// `true`.
+    pub fn open(path: PathBuf, watch: bool, cx: &mut Context<Self>) -> Self {
         let mut state = Self {
             path,
             head: LoadState::Loading,
@@ -78,7 +85,9 @@ impl RepositoryState {
         state.reload_head(cx);
         state.reload_references(cx);
         state.reload_history(cx);
-        state.start_watching(cx);
+        if watch {
+            state.start_watching(cx);
+        }
         state
     }
 

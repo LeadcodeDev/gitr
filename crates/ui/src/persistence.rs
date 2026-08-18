@@ -22,6 +22,7 @@ const APPLICATION_SUPPORT_DIR: &str = "Library/Application Support/gitr";
 const DOCK_LAYOUT_FILE: &str = "dock-layout.json";
 const THEME_PREFERENCE_FILE: &str = "theme-preference.json";
 const PROJECTS_FILE: &str = "projects.json";
+const REMOTE_CACHE_DIR: &str = "remotes";
 
 /// Where the dock layout lives for the signed-in user, or `None` if `$HOME` is unset.
 ///
@@ -153,6 +154,21 @@ pub fn save_project_list(list: &ProjectList) -> anyhow::Result<()> {
 /// an empty list, never as an error to surface.
 pub fn load_project_list() -> Option<ProjectList> {
     load_project_list_from(&project_list_path()?).ok()
+}
+
+/// Where a remote project's bare partial clone lands, or `None` if `$HOME` is unset. See
+/// [`dock_layout_path`] — same directory, same not-cached reasoning.
+///
+/// This is a cache gitr fills and reads on its own, not a location the user ever browses
+/// or is asked to pick — [`crate::project::remote_cache_dir`] derives a specific clone's
+/// directory underneath it from the URL alone.
+pub fn remote_cache_root() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join(APPLICATION_SUPPORT_DIR)
+            .join(REMOTE_CACHE_DIR),
+    )
 }
 
 #[cfg(test)]
