@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use domain::{CommitSummary, HistoryRequest, HistoryScope, Parents, RepositoryError};
 use gix::refs::Category;
 use gix::traverse::commit::{Parents as TraverseParents, topo};
@@ -69,6 +71,17 @@ fn resolve_tips(
     }
 }
 
+/// Collects the tips matching `include`, each appearing exactly once.
+///
+/// Deduplication is load-bearing, not tidiness. Several references routinely resolve to the
+/// same commit — `main` and `origin/main` after a push, a tag on a branch tip — and a
+/// repeated identifier makes `gix`'s topological traversal terminate early: on a repository
+/// with 46 references resolving to 32 distinct commits, the walk returned 139 of 328
+/// commits, dropping ancestors of tips it had itself been given. Deduplicated, it returns
+/// all 328. `gix` 0.86; a date-ordered or breadth-first walk over the same duplicated tips
+/// is unaffected.
+///
+/// First-seen order is preserved so a walk is reproducible across runs.
 fn collect_tips(
     repo: &gix::Repository,
     include: impl Fn(Category) -> bool,
@@ -81,6 +94,7 @@ fn collect_tips(
         .map_err(|err| backend("listing references for history", err))?;
 
     let mut tips = Vec::new();
+    let mut seen = HashSet::new();
     for reference in iter {
         let mut reference =
             reference.map_err(|err| backend_boxed("reading a reference for history", err))?;
@@ -94,7 +108,9 @@ fn collect_tips(
             .peel_to_id()
             .map_err(|err| backend(format!("resolving {}", reference.name()), err))?
             .detach();
-        tips.push(id);
+        if seen.insert(id) {
+            tips.push(id);
+        }
     }
 
     if let Some(head_target) = repo
@@ -103,7 +119,7 @@ fn collect_tips(
         .id()
     {
         let head_target = head_target.detach();
-        if !tips.contains(&head_target) {
+        if seen.insert(head_target) {
             tips.push(head_target);
         }
     }

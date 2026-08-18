@@ -491,3 +491,51 @@ fn history_is_walked_in_topological_order_not_date_order() {
     );
     assert_ne!(ids, date_order_via_git);
 }
+
+#[test]
+fn duplicate_reference_targets_do_not_truncate_the_walk() {
+    let repo = init_repo();
+    let dir = repo.path();
+
+    let root = commit(dir, "root", 1_700_000_000);
+    for step in 0..6 {
+        commit(dir, &format!("main {step}"), 1_700_000_100 + step);
+    }
+    let tip = rev_parse(dir, "HEAD");
+
+    git_at(
+        dir,
+        &["checkout", "-q", "-b", "side", &root.to_string()],
+        1_700_000_150,
+    );
+    for step in 0..6 {
+        commit(dir, &format!("side {step}"), 1_700_000_200 + step);
+    }
+    git_at(dir, &["checkout", "-q", "main"], 1_700_000_300);
+
+    git_at(dir, &["tag", "release", &tip.to_string()], 1_700_000_310);
+    git_at(dir, &["branch", "mirror", &tip.to_string()], 1_700_000_320);
+    git_at(
+        dir,
+        &["update-ref", "refs/remotes/origin/main", &tip.to_string()],
+        1_700_000_330,
+    );
+
+    let expected: HashSet<String> = run(dir, &["rev-list", "--all"], &[])
+        .lines()
+        .map(str::to_string)
+        .collect();
+
+    let reader = GixRepositoryReader::open(dir).unwrap();
+    let walked: HashSet<String> = reader
+        .history(&HistoryRequest::all())
+        .unwrap()
+        .iter()
+        .map(|summary| summary.id.to_string())
+        .collect();
+
+    assert_eq!(
+        walked, expected,
+        "four references resolve to the same commit; a repeated tip must not cut the walk short"
+    );
+}
