@@ -46,6 +46,24 @@ pub struct GraphRow {
     /// Colour of the node itself, which is the colour of the lane it continues.
     pub color: LaneColor,
     pub segments: Vec<Segment>,
+    /// Whether some child above already occupied this commit's lane.
+    ///
+    /// False for a branch tip, which nothing points at from above. A renderer needs this to
+    /// know whether to draw the half-height stub from the top of the band down into the
+    /// node: without it, a tip grows a line above it that leads nowhere, and the row below
+    /// a commit that has none cannot tell the difference.
+    pub has_incoming: bool,
+}
+
+impl GraphRow {
+    /// Whether `segment` is this commit's own link to a parent rather than an unrelated
+    /// lane crossing the band.
+    ///
+    /// The distinction is what stops a line from being drawn through a node: an outgoing
+    /// link starts at the node's centre, half a band below where a crossing line enters.
+    pub fn is_outgoing(&self, segment: &Segment) -> bool {
+        segment.from == self.lane
+    }
 }
 
 /// The gutter for one history read.

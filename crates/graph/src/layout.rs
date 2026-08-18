@@ -40,6 +40,7 @@ pub fn layout(commits: &[CommitSummary]) -> GraphLayout {
     let mut palette_cursor: u8 = 0;
 
     for commit in commits {
+        let was_reserved = track_lane.contains_key(&commit.id);
         let lane_index = place(commit.id, &mut tracks, &mut track_lane, || {
             allocate_color(&mut palette_cursor)
         });
@@ -84,6 +85,7 @@ pub fn layout(commits: &[CommitSummary]) -> GraphLayout {
             lane: Lane(lane_index as u16),
             color: commit_color,
             segments,
+            has_incoming: was_reserved,
         });
 
         tracks = next_tracks;
