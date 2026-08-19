@@ -17,6 +17,12 @@
 //! user is looking at. `GITR_FOREGROUND` marks the second process, and setting it by hand
 //! keeps everything in one attached process — the only way to see a panic or a log line.
 //!
+//! `cx.activate(true)` runs once the window exists, and is what puts gitr in front. macOS
+//! does not hand the foreground to a process launched from a terminal — the window opens
+//! behind the terminal and stays there — so the app has to ask, through
+//! `activateIgnoringOtherApps:`. It comes after `open_window` because activating with no
+//! window would bring nothing forward.
+//!
 //! `cx.on_action::<Quit>` runs before `Workspace::new` — reached only inside the
 //! `cx.spawn` below, on a later turn of the executor — ever gets a chance to call
 //! `cx.set_menus`. A menu item's *presence* does not depend on a handler existing for it,
@@ -90,6 +96,8 @@ fn main() -> ExitCode {
                     cx.new(|cx| Root::new(workspace, window, cx))
                 })
                 .expect("gitr cannot run without a window");
+
+                cx.update(|cx| cx.activate(true));
             })
             .detach();
         });
