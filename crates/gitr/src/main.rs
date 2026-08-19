@@ -9,6 +9,10 @@
 //! so an application menu carrying Quit without this line would still render a working
 //! "Quit gitr" item that silently does nothing when clicked, exactly the failure mode
 //! `crates/ui/src/actions.rs` warns about.
+//!
+//! `Workspace::register_menu_actions` is that same registration for the other ten menu
+//! actions, and belongs here for the same reason: a menu item is only ever enabled by a
+//! global handler, never by one on the window's element tree.
 
 use std::env;
 use std::path::PathBuf;
@@ -64,6 +68,7 @@ fn main() -> ExitCode {
             cx.spawn(async move |cx| {
                 cx.open_window(TitleBar::window_options(), |window, cx| {
                     let workspace = cx.new(|cx| Workspace::new(projects, window, cx));
+                    Workspace::register_menu_actions(&workspace, window, cx);
                     cx.new(|cx| Root::new(workspace, window, cx))
                 })
                 .expect("gitr cannot run without a window");
