@@ -17,11 +17,21 @@ Milestone 1 — read and visualise. Not yet usable.
 
 ## Installing
 
+This repository is private, so the fetch has to go through your own credentials:
+
 ```sh
-cargo install --git https://github.com/LeadcodeDev/gitr
+cargo install --git ssh://git@github.com/LeadcodeDev/gitr \
+  --config net.git-fetch-with-cli=true
 ```
 
-That installs one command, `gitr`:
+`net.git-fetch-with-cli` is not optional here. Cargo fetches through its bundled libgit2,
+which reads neither `~/.ssh/config` nor your SSH agent, and fails with `no authentication
+methods succeeded`; the flag delegates the fetch to the `git` binary, which has both. The
+HTTPS form fails for the same class of reason, with no credential helper to draw on. Were
+this repository public, plain `cargo install --git https://github.com/LeadcodeDev/gitr`
+would work with no configuration at all.
+
+Either way it installs one command, `gitr`:
 
 ```sh
 gitr              # open the repository containing the working directory

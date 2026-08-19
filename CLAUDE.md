@@ -95,6 +95,13 @@ The subprocess must inherit a `PATH` resolved from the user's login shell — a 
 app gets a truncated one, which is why GitX fails with `git: 'credential-osxkeychain' is
 not a git command`.
 
+The same limitation applies to *installing* gitr, since cargo fetches through its own
+bundled libgit2. This repository is private, and `cargo install --git` fails against it
+both over HTTPS (no credential helper) and over SSH (`no authentication methods
+succeeded`) until `--config net.git-fetch-with-cli=true` hands the fetch to the `git`
+binary. Verified end to end: it installs `gitr_gui` and drops an executable named `gitr`.
+Making the repository public would remove the need for the flag on the HTTPS form.
+
 **No blocking modal for long operations.** GitX crashes on
 `assert(currentModalSheet == nil)` when two network operations overlap. Long work runs on
 `cx.background_executor()` and reports through the status bar and notifications.
