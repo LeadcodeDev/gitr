@@ -21,12 +21,15 @@ at a few seconds instead of a few minutes.
 ## Commands that actually run
 
 ```sh
-cargo test -p domain -p graph     # fast loop, no gpui in the tree
-cargo test --workspace            # exit check
+cargo test -p gitr-domain -p gitr-graph   # fast loop, no gpui in the tree
+cargo test --workspace                    # exit check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
-cargo run -p gitr                 # launch the app
+cargo run -p gitr_gui                     # launch the app
 ```
+
+`-p` takes the *published package* name, so it is prefixed even though the code imports these
+crates unprefixed — `-p domain` and `-p gitr` both fail with "did not match any packages".
 
 Cargo holds one lock per target directory, so `clippy` and `test` do not run
 concurrently in the same checkout. Batch them only across distinct `CARGO_TARGET_DIR`s.
@@ -114,11 +117,36 @@ and a valid root commit produce byte-identical stderr. `crates/vcs/src/process/`
 against its first parent and detects the root commit with two `rev-parse --verify` probes
 rather than by matching git's error text.
 
+**A crate's published name, its lib target and its import name are three separate things**,
+and this workspace uses all three. crates.io has one flat global namespace in which `gitr`,
+`domain`, `ui` and `graph` were already taken, so the packages are `gitr_gui`, `gitr-domain`,
+`gitr-graph`, `gitr-vcs` and `gitr-ui`. Each library then pins `[lib] name` back to the short
+form and the root `Cargo.toml` renames the dependency (`domain = { package = "gitr-domain",
+… }`), so every `use domain::…` in the source keeps working untouched. Cargo's own `-p` flag
+does not: it names packages, so it takes the prefixed form. The binary is
+`[[bin]] name = "gitr"` inside package `gitr_gui`, so `cargo install gitr_gui` installs a
+command called `gitr`.
+
+**Renaming a lib target breaks `tests/` without breaking `src/`.** A crate's own integration
+tests reach it by its *lib target* name, so dropping `[lib] name` here would leave
+`cargo check --workspace` green and fail only under `cargo test --workspace`. Path deps also
+need a `version` alongside `path` or nothing publishes.
+
+**gitr cannot be published to crates.io while `gpui` comes from git.** `cargo publish` rejects
+it outright: *"all dependencies must have a version requirement specified when publishing"*.
+Adding `version` next to `git` silences that, but it publishes a crate compiled against zed's
+default branch while telling users to build it against crates.io `gpui 0.2.2` — untested by
+construction. `gpui_platform` is not on crates.io at all. Verify with
+`cargo publish --dry-run -p <crate> --allow-dirty`; `gitr-domain` passes today because it
+depends only on `thiserror`. Publication order follows the dependency graph: `gitr-domain`,
+then `gitr-graph` and `gitr-vcs`, then `gitr-ui`, then `gitr_gui`.
+
 ## House rules
 
 - No `async_trait`, ever. gpui has its own executor; ports are synchronous and blocking,
   called from `cx.background_executor().spawn()`. tokio is not in the tree.
 - Prefer enum dispatch to `Box<dyn Trait>` wherever the set of implementations is closed.
-- Workspace crate names carry no `gitr-` prefix.
+- Crates are imported unprefixed — `use domain::…`, never `use gitr_domain::…`. The
+  `gitr-` prefix exists only in the published package name, for crates.io's namespace.
 - Commit convention: `<type>(<subject>): <imperative message>`.
 - Never add an AI co-author trailer to a commit, issue or pull request.

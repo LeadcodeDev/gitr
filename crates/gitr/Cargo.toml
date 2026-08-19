@@ -1,10 +1,17 @@
 [package]
-name = "gitr"
-version = "0.1.0"
+name = "gitr_gui"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "A desktop Git client built on gpui. Run `gitr` in a checkout to open it."
+keywords = ["git", "gui", "desktop", "vcs", "gpui"]
+categories = ["development-tools", "gui"]
+
+[[bin]]
+name = "gitr"
+path = "src/main.rs"
 
 [dependencies]
 ui.workspace = true
@@ -14,6 +21,9 @@ gpui_platform.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

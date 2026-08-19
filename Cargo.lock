@@ -1598,13 +1598,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "domain"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2296,16 +2289,58 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
-name = "gitr"
+name = "gitr-domain"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "gitr-graph"
+version = "0.1.0"
+dependencies = [
+ "gitr-domain",
+]
+
+[[package]]
+name = "gitr-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "domain",
+ "gitr-domain",
+ "gitr-graph",
+ "gitr-vcs",
+ "gpui",
+ "gpui-component",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "gitr-vcs"
+version = "0.1.0"
+dependencies = [
+ "gitr-domain",
+ "gix",
+ "notify 8.2.0",
+ "notify-debouncer-full",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "gitr_gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gitr-domain",
+ "gitr-ui",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
- "ui",
+ "tempfile",
 ]
 
 [[package]]
@@ -3759,13 +3794,6 @@ checksum = "d03f81ad4732830d85cfd417a9f62cde6dadda4354d37d078a6084a19560aa2d"
 dependencies = [
  "arraydeque",
  "smallvec",
-]
-
-[[package]]
-name = "graph"
-version = "0.1.0"
-dependencies = [
- "domain",
 ]
 
 [[package]]
@@ -8321,21 +8349,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "domain",
- "gpui",
- "gpui-component",
- "graph",
- "serde",
- "serde_json",
- "tempfile",
- "vcs",
-]
-
-[[package]]
 name = "uluru"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8595,18 +8608,6 @@ dependencies = [
  "sval_json",
  "sval_ref",
  "sval_serde",
-]
-
-[[package]]
-name = "vcs"
-version = "0.1.0"
-dependencies = [
- "domain",
- "gix",
- "notify 8.2.0",
- "notify-debouncer-full",
- "tempfile",
- "thiserror 2.0.20",
 ]
 
 [[package]]
