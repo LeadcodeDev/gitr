@@ -1,10 +1,15 @@
 [package]
-name = "domain"
-version = "0.1.0"
+name = "gitr-domain"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Entities, value objects and ports for gitr. Internal to the gitr_gui application."
+
+[lib]
+name = "domain"
+path = "src/lib.rs"
 
 [dependencies]
 thiserror.workspace = true
