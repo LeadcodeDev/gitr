@@ -9,6 +9,14 @@
 //! failure is reported on stderr with a non-zero exit — never a panic, and never an empty
 //! window.
 //!
+//! `gitr` runs as two processes. The one the shell starts resolves the repository, saves
+//! the project list, relaunches itself detached and exits, which is what gives the prompt
+//! straight back; the detached one opens the window. Validation stays in the first,
+//! deliberately: a detached process has its streams on `/dev/null`, so an error reported
+//! there would vanish, and `gitr /nonexistent` has to keep failing in the terminal the
+//! user is looking at. `GITR_FOREGROUND` marks the second process, and setting it by hand
+//! keeps everything in one attached process — the only way to see a panic or a log line.
+//!
 //! `cx.on_action::<Quit>` runs before `Workspace::new` — reached only inside the
 //! `cx.spawn` below, on a later turn of the executor — ever gets a chance to call
 //! `cx.set_menus`. A menu item's *presence* does not depend on a handler existing for it,
@@ -21,8 +29,10 @@
 //! global handler, never by one on the window's element tree.
 
 use std::env;
+use std::io;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use domain::RepositoryError;
 use gpui::{App, AppContext};
@@ -55,6 +65,16 @@ fn main() -> ExitCode {
         eprintln!("gitr: failed to save project list: {error:#}");
     }
 
+    if env::var_os(FOREGROUND).is_none() {
+        return match relaunch_detached() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("gitr: could not start in the background: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
@@ -75,6 +95,36 @@ fn main() -> ExitCode {
         });
 
     ExitCode::SUCCESS
+}
+
+/// Set on the process that opens the window, so it runs the event loop instead of
+/// relaunching itself forever.
+///
+/// Setting it by hand — `GITR_FOREGROUND=1 gitr` — is also the only way to keep the window
+/// attached to the terminal, which is what a panic message or a log line needs to be seen
+/// at all.
+const FOREGROUND: &str = "GITR_FOREGROUND";
+
+/// Starts a second copy of this executable that outlives the shell, so the caller can
+/// return the prompt.
+///
+/// The child gets its own process group. Without that it stays in the shell's foreground
+/// group and takes a `Ctrl-C` aimed at whatever the user runs next, which would kill the
+/// window from a keystroke that had nothing to do with it.
+///
+/// Its three standard streams go to `/dev/null` rather than being inherited. A detached
+/// GUI process writing to the terminal would interleave with the user's next command, and
+/// gpui logs on a missing asset — the reason nothing is validated after this point.
+fn relaunch_detached() -> io::Result<()> {
+    Command::new(env::current_exe()?)
+        .args(env::args_os().skip(1))
+        .env(FOREGROUND, "1")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
 }
 
 /// Whether failing to open the startup repository aborts the launch rather than falling
