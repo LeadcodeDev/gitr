@@ -27,8 +27,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -p domain -p graph -p vcs --all-targets -- -D warnings
-      - run: cargo test -p domain -p graph -p vcs
+      - run: cargo clippy -p gitr-domain -p gitr-graph -p gitr-vcs --all-targets -- -D warnings
+      - run: cargo test -p gitr-domain -p gitr-graph -p gitr-vcs
 
   app:
     name: ui and gitr
@@ -36,5 +36,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace
+      # Not `cargo build`: a build alone compiles neither the test targets nor the
+      # integration tests, so it stays green through breakage that only those see —
+      # which is exactly how the package rename shipped red.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
