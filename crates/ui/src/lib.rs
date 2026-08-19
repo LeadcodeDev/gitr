@@ -11,6 +11,7 @@
 //! [`detail::DetailPanel`] — see `install_default_layout` in `workspace` for exactly
 //! where those two panels plug into the dock.
 
+pub mod actions;
 pub mod density;
 pub mod detail;
 pub mod graph_palette;

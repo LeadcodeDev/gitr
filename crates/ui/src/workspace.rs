@@ -39,15 +39,16 @@ use std::time::{Duration, SystemTime};
 use domain::{Aspect, HeadState, HistoryScope, Reference, RepositoryChange};
 use gpui::{
     Animation, AnimationExt as _, App, AppContext as _, Axis, Context, Entity, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
-    ScrollHandle, Styled as _, Subscription, Task, WeakEntity, Window, div, ease_in_out, px,
+    InteractiveElement as _, IntoElement, Menu, MenuItem, OsAction, ParentElement as _,
+    PathPromptOptions, Render, ScrollHandle, Styled as _, Subscription, Task, WeakEntity, Window,
+    div, ease_in_out, px,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Root, Sizable as _, Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dock::{DockArea, DockAreaState, DockEvent, DockItem, Panel, StackPanel, TabPanel},
     h_flex,
-    input::{InputEvent, InputState},
+    input::{Copy, Cut, InputEvent, InputState, Paste, SelectAll},
     menu::{DropdownMenu as _, PopupMenuItem},
     notification::NotificationType,
     status_bar::StatusBar,
@@ -55,6 +56,10 @@ use gpui_component::{
 use vcs::process::{CloneProgress, GitRunner};
 
 use crate::{
+    actions::{
+        About, MinimizeWindow, OpenFromDisk, Quit, SynchroniseActiveProject, ToggleDetailPanel,
+        ToggleSidebar, UseDarkTheme, UseLightTheme, UseSystemTheme, ZoomWindow,
+    },
     detail::DetailPanel,
     history::{HistoryPanel, HistoryPanelEvent},
     persistence,
@@ -310,7 +315,7 @@ impl Workspace {
 
         let window_closed_subscription = cx.on_window_closed(|cx, _window_id| cx.quit());
 
-        Self {
+        let workspace = Self {
             dock_area,
             projects,
             repository,
@@ -336,7 +341,9 @@ impl Workspace {
             _project_search_subscription: project_search_subscription,
             _project_url_subscription: project_url_subscription,
             _window_closed_subscription: window_closed_subscription,
-        }
+        };
+        workspace.refresh_application_menus(cx);
+        workspace
     }
 
     /// Applies `preference`, persists it, and — when it changes which mode is actually
@@ -398,6 +405,117 @@ impl Workspace {
             .detach();
 
         cx.notify();
+        self.refresh_application_menus(cx);
+    }
+
+    /// Flips whether the sidebar is shown — the title bar's own button and
+    /// [`ToggleSidebar`] from the View menu both call this rather than either mutating
+    /// `sidebar_collapsed` on its own.
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        cx.notify();
+    }
+
+    /// Rebuilds and reinstalls the whole native menu bar. `gpui` has no way to patch a
+    /// single item — such as the Theme submenu's checkmark — in place, so every call
+    /// replaces the entire tree; see [`Self::new`] for the initial install and
+    /// [`Self::set_theme_preference`] for the one state change that reflects back into a
+    /// menu item's appearance rather than only into what clicking it later does.
+    fn refresh_application_menus(&self, cx: &Context<Self>) {
+        cx.set_menus(application_menus(self.theme_preference));
+    }
+
+    /// There is no bundled `Info.plist` for the native About panel to read, and the
+    /// house rule against modal dialogs rules out building one from scratch, so this
+    /// reuses the same non-blocking notification every other informational message in
+    /// this file already goes through.
+    fn on_about_action(&mut self, _: &About, window: &mut Window, cx: &mut Context<Self>) {
+        window.push_notification((NotificationType::Info, "gitr".to_string()), cx);
+    }
+
+    fn on_toggle_sidebar_action(
+        &mut self,
+        _: &ToggleSidebar,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_sidebar(cx);
+    }
+
+    fn on_toggle_detail_action(
+        &mut self,
+        _: &ToggleDetailPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_detail(window, cx);
+    }
+
+    fn on_open_from_disk_action(
+        &mut self,
+        _: &OpenFromDisk,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_from_disk(window, cx);
+    }
+
+    /// A no-op, not an error, when the active project is already local — see
+    /// [`Self::synchronise_active_project`]. The item stays enabled regardless, rather
+    /// than this file tracking a second, duplicate notion of "is the active project
+    /// remote" purely to grey a menu item out.
+    fn on_synchronise_action(
+        &mut self,
+        _: &SynchroniseActiveProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.synchronise_active_project(window, cx);
+    }
+
+    fn on_use_light_theme_action(
+        &mut self,
+        _: &UseLightTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_theme_preference(ThemePreference::Light, window, cx);
+    }
+
+    fn on_use_dark_theme_action(
+        &mut self,
+        _: &UseDarkTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_theme_preference(ThemePreference::Dark, window, cx);
+    }
+
+    fn on_use_system_theme_action(
+        &mut self,
+        _: &UseSystemTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_theme_preference(ThemePreference::System, window, cx);
+    }
+
+    fn on_minimize_window_action(
+        &mut self,
+        _: &MinimizeWindow,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.minimize_window();
+    }
+
+    fn on_zoom_window_action(
+        &mut self,
+        _: &ZoomWindow,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.zoom_window();
     }
 
     /// Scopes the history to `reference` and pushes it both to [`RepositoryState`], which
@@ -1197,8 +1315,7 @@ fn title_bar(
                         })
                         .tooltip("Toggle Sidebar")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.sidebar_collapsed = !this.sidebar_collapsed;
-                            cx.notify();
+                            this.toggle_sidebar(cx);
                         })),
                 )
                 .child(div().text_sm().child(title)),
@@ -1277,6 +1394,85 @@ fn theme_preference_menu_item(
         })
 }
 
+/// The whole native macOS menu bar, rebuilt from scratch on every call — see
+/// [`Workspace::refresh_application_menus`] for when. `Cut`, `Copy`, `Paste` and
+/// `Select All` carry `gpui_component::input`'s own actions and matching [`OsAction`],
+/// not an action this crate defines: the project search box, the "add from URL" field
+/// and the readonly diff editor each register a handler for those every time they
+/// paint, so the menu item reaches whichever one currently has focus exactly as the
+/// keyboard shortcut already does.
+fn application_menus(theme_preference: ThemePreference) -> Vec<Menu> {
+    vec![
+        Menu {
+            name: "gitr".into(),
+            items: vec![
+                MenuItem::action("About gitr", About),
+                MenuItem::separator(),
+                MenuItem::action("Quit gitr", Quit),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("Open from Disk…", OpenFromDisk),
+                MenuItem::separator(),
+                MenuItem::action("Synchronise", SynchroniseActiveProject),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "Edit".into(),
+            items: vec![
+                MenuItem::os_action("Cut", Cut, OsAction::Cut),
+                MenuItem::os_action("Copy", Copy, OsAction::Copy),
+                MenuItem::os_action("Paste", Paste, OsAction::Paste),
+                MenuItem::separator(),
+                MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                MenuItem::action("Toggle Detail Panel", ToggleDetailPanel),
+                MenuItem::separator(),
+                MenuItem::submenu(application_theme_menu(theme_preference)),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "Window".into(),
+            items: vec![
+                MenuItem::action("Minimize", MinimizeWindow),
+                MenuItem::action("Zoom", ZoomWindow),
+            ],
+            disabled: false,
+        },
+    ]
+}
+
+fn application_theme_menu(current: ThemePreference) -> Menu {
+    Menu {
+        name: "Theme".into(),
+        items: ThemePreference::ALL
+            .into_iter()
+            .map(|option| application_theme_menu_item(option, current))
+            .collect(),
+        disabled: false,
+    }
+}
+
+fn application_theme_menu_item(option: ThemePreference, current: ThemePreference) -> MenuItem {
+    let item = match option {
+        ThemePreference::Light => MenuItem::action(option.label(), UseLightTheme),
+        ThemePreference::Dark => MenuItem::action(option.label(), UseDarkTheme),
+        ThemePreference::System => MenuItem::action(option.label(), UseSystemTheme),
+    };
+    item.checked(option == current)
+}
+
 fn status_bar(history: &LoadState<Arc<History>>) -> StatusBar {
     let commit_count = match history {
         LoadState::Ready(history) => format!("{} commits", history.len()),
@@ -1306,6 +1502,7 @@ fn theme_transition_overlay(transition: &ThemeTransition) -> impl IntoElement {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
         let sidebar_collapsed = self.sidebar_collapsed;
         let dock_area = self.dock_area.clone();
         let close_selector = std::mem::take(&mut self.close_selector);
@@ -1338,6 +1535,16 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
+            .on_action(window.listener_for(&entity, Self::on_about_action))
+            .on_action(window.listener_for(&entity, Self::on_toggle_sidebar_action))
+            .on_action(window.listener_for(&entity, Self::on_toggle_detail_action))
+            .on_action(window.listener_for(&entity, Self::on_open_from_disk_action))
+            .on_action(window.listener_for(&entity, Self::on_synchronise_action))
+            .on_action(window.listener_for(&entity, Self::on_use_light_theme_action))
+            .on_action(window.listener_for(&entity, Self::on_use_dark_theme_action))
+            .on_action(window.listener_for(&entity, Self::on_use_system_theme_action))
+            .on_action(window.listener_for(&entity, Self::on_minimize_window_action))
+            .on_action(window.listener_for(&entity, Self::on_zoom_window_action))
             .child(title_bar(
                 &repository_name,
                 &head,
@@ -1373,6 +1580,56 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every action a built menu tree references — submenus included — is one this file
+    /// or `crates/gitr/src/main.rs` registers a handler for. This cannot see `render`'s
+    /// own `.on_action` calls, which need a live window, so it checks the weaker but
+    /// still load-bearing half: that the menu never grows an item pointing at an action
+    /// absent from the fixed set this test — and a human reading a diff that adds to
+    /// `application_menus` without adding here — both have to keep in sync by hand.
+    #[test]
+    fn every_menu_item_references_a_known_and_handled_action() {
+        use gpui::Action;
+        use std::collections::HashSet;
+
+        fn action_names(items: &[MenuItem]) -> Vec<&'static str> {
+            items
+                .iter()
+                .flat_map(|item| match item {
+                    MenuItem::Action { action, .. } => vec![action.name()],
+                    MenuItem::Submenu(menu) => action_names(&menu.items),
+                    MenuItem::Separator | MenuItem::SystemMenu(_) => Vec::new(),
+                })
+                .collect()
+        }
+
+        let handled: HashSet<&str> = [
+            About::name_for_type(),
+            Quit::name_for_type(),
+            ToggleSidebar::name_for_type(),
+            ToggleDetailPanel::name_for_type(),
+            OpenFromDisk::name_for_type(),
+            SynchroniseActiveProject::name_for_type(),
+            UseLightTheme::name_for_type(),
+            UseDarkTheme::name_for_type(),
+            UseSystemTheme::name_for_type(),
+            MinimizeWindow::name_for_type(),
+            ZoomWindow::name_for_type(),
+            Cut::name_for_type(),
+            Copy::name_for_type(),
+            Paste::name_for_type(),
+            SelectAll::name_for_type(),
+        ]
+        .into_iter()
+        .collect();
+
+        let referenced: HashSet<&str> = application_menus(ThemePreference::default())
+            .iter()
+            .flat_map(|menu| action_names(&menu.items))
+            .collect();
+
+        assert_eq!(handled, referenced);
+    }
 
     const SHOWN_CENTER: &str = r#"{
         "version": 4,
