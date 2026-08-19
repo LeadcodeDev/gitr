@@ -32,6 +32,12 @@ Run from a directory that is not inside a repository, `gitr` reopens the project
 already knows. Naming a path that is not a repository is an error, because you asked for
 that one by name.
 
+The command returns the prompt straight away and leaves the window running, so the
+terminal stays yours. Errors still land in it: the repository is resolved before the app
+detaches, so `gitr /nonexistent` fails where you can see it and starts nothing.
+`GITR_FOREGROUND=1 gitr` keeps everything in one attached process, which is the only way
+to see a panic or a log line.
+
 gitr is not on crates.io, and cannot be for now. `gpui` is reachable only from git, and
 zed's February 2026 split left the version on crates.io frozen and unable to receive the
 rest of the framework. `CLAUDE.md` records what changing that would cost.
