@@ -32,6 +32,14 @@ struct Track {
 ///
 /// Runs in `O(commits.len() * peak_width)` with a `HashMap` lookup per column visited per
 /// row, since each row rebuilds its column list from the one above by scanning it once.
+///
+/// A segment is drawn in the colour of the track it *continues*, never the one it lands
+/// on. A commit's first-parent link continues its own track, so it keeps the commit's
+/// colour even where it converges into a lane another track already holds — otherwise a
+/// branch runs in its own colour for its whole length and then changes colour on the one
+/// segment that reaches the branch it rejoins, which reads as the branch ending a row
+/// early. A second-parent link is the other case: it does not continue the merge commit's
+/// track, it reaches into the track being merged, so it takes that track's colour.
 pub fn layout(commits: &[CommitSummary]) -> GraphLayout {
     let mut tracks: Vec<Track> = Vec::new();
     let mut track_lane: HashMap<ObjectId, usize> = HashMap::new();
@@ -60,10 +68,15 @@ pub fn layout(commits: &[CommitSummary]) -> GraphLayout {
                             allocate_color(&mut palette_cursor)
                         }
                     });
+                    let color = if parent_index == 0 {
+                        commit_color
+                    } else {
+                        next_tracks[to].color
+                    };
                     segments.push(Segment {
                         from: Lane(lane_index as u16),
                         to: Lane(to as u16),
-                        color: next_tracks[to].color,
+                        color,
                     });
                 }
             } else {
@@ -73,7 +86,7 @@ pub fn layout(commits: &[CommitSummary]) -> GraphLayout {
                 segments.push(Segment {
                     from: Lane(index as u16),
                     to: Lane(to as u16),
-                    color: next_tracks[to].color,
+                    color: track.color,
                 });
             }
         }

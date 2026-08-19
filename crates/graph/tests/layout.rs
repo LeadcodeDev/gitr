@@ -102,7 +102,12 @@ fn a_branch_that_diverges_and_never_rejoins_keeps_its_own_lane_until_the_shared_
 
     assert_eq!(result.rows[2].lane, Lane(0));
     assert_eq!(result.rows[2].color, LaneColor(0));
-    assert_eq!(result.rows[2].segments, vec![seg(0, 0, 0), seg(1, 0, 0)]);
+    assert_eq!(
+        result.rows[2].segments,
+        vec![seg(0, 0, 0), seg(1, 0, 1)],
+        "the branch keeps its own colour on the segment that reaches the track it rejoins, \
+         or it appears to end a row before it does"
+    );
 
     assert_eq!(result.rows[3].lane, Lane(0));
     assert_eq!(result.rows[3].color, LaneColor(0));
@@ -132,7 +137,11 @@ fn a_branch_that_diverges_and_merges_back_frees_its_lane_again() {
 
     assert_eq!(result.rows[2].lane, Lane(0));
     assert_eq!(result.rows[2].color, LaneColor(0));
-    assert_eq!(result.rows[2].segments, vec![seg(0, 0, 0), seg(1, 0, 0)]);
+    assert_eq!(
+        result.rows[2].segments,
+        vec![seg(0, 0, 0), seg(1, 0, 1)],
+        "the merged branch stays its own colour all the way into the junction"
+    );
 
     assert_eq!(result.rows[3].lane, Lane(0));
     assert_eq!(result.rows[3].color, LaneColor(0));
