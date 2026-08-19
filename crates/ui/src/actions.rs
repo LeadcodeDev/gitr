@@ -1,11 +1,16 @@
 //! Actions gitr's macOS menu bar dispatches.
 //!
-//! [`Quit`] is registered once, globally, in `crates/gitr/src/main.rs`: closing the one
-//! window already calls `cx.quit()`, and the application menu's Quit item must reach the
-//! same call regardless of which window, if any, currently has focus. Every other action
-//! here is registered window-scoped, on `Workspace`'s render root in
-//! `crates/ui/src/workspace.rs`, because each one acts on the single `Workspace` that
-//! window holds.
+//! Every action here is registered globally, on the `App`, from `crates/gitr/src/main.rs`:
+//! [`Quit`] directly, since closing the one window already calls `cx.quit()`, and the other
+//! ten through `Workspace::register_menu_actions`.
+//!
+//! Global is the only scope a menu item can be driven from. macOS decides whether to draw
+//! an item enabled by asking `App::is_action_available`, which a window answers by walking
+//! its dispatch path from the focused element to the window root — a path that, with
+//! nothing focused, starts *at* the root and so holds only the root. Registering these ten
+//! on `Workspace`'s render root, a descendant of that root, left every one of them greyed
+//! out and unclickable while `Quit` alone stayed live. See
+//! `Workspace::register_menu_actions`.
 //!
 //! `Cut`, `Copy`, `Paste` and `Select All` are not defined here — the menu references
 //! `gpui_component::input`'s own actions directly, since every editable region in the

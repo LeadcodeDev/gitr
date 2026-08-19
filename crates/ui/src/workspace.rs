@@ -31,6 +31,7 @@
 //! downstream reads a repository itself.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -38,10 +39,10 @@ use std::time::{Duration, SystemTime};
 
 use domain::{Aspect, HeadState, HistoryScope, Reference, RepositoryChange};
 use gpui::{
-    Animation, AnimationExt as _, App, AppContext as _, Axis, Context, Entity, Hsla,
-    InteractiveElement as _, IntoElement, Menu, MenuItem, OsAction, ParentElement as _,
-    PathPromptOptions, Render, ScrollHandle, Styled as _, Subscription, Task, WeakEntity, Window,
-    div, ease_in_out, px,
+    Action, Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, Axis, Context,
+    Entity, Hsla, InteractiveElement as _, IntoElement, Menu, MenuItem, OsAction,
+    ParentElement as _, PathPromptOptions, Render, ScrollHandle, Styled as _, Subscription, Task,
+    WeakEntity, Window, div, ease_in_out, px,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Root, Sizable as _, Theme, ThemeMode, TitleBar, WindowExt as _,
@@ -423,6 +424,36 @@ impl Workspace {
     /// menu item's appearance rather than only into what clicking it later does.
     fn refresh_application_menus(&self, cx: &Context<Self>) {
         cx.set_menus(application_menus(self.theme_preference));
+    }
+
+    /// Registers every menu action this crate defines on the [`App`], not on the render
+    /// root. Call it once, for the window's workspace.
+    ///
+    /// macOS asks [`App::is_action_available`] whether to draw a menu item enabled, and a
+    /// window answers by walking `dispatch_path` from the focused element up to the window
+    /// root. With nothing focused, `focus_node_id_in_rendered_frame` falls back to the
+    /// root, and a path that starts at the root holds only the root — so no handler
+    /// registered on a descendant is ever on it. [`Self::render`]'s `div` is such a
+    /// descendant, which greyed out every item registered there. A global registration is
+    /// consulted regardless of focus, on both the availability check and the dispatch, and
+    /// is why the `Quit` item in `crates/gitr/src/main.rs` always worked.
+    ///
+    /// gitr opens exactly one window holding exactly one `Workspace`, so global scope here
+    /// is not a widened one. The handle is deliberately weak: these closures live as long
+    /// as the [`App`], which outlives the entity.
+    pub fn register_menu_actions(workspace: &Entity<Self>, window: &Window, cx: &mut App) {
+        let workspace = workspace.downgrade();
+        let window = window.window_handle();
+        register_menu_action(cx, &workspace, window, Self::on_about_action);
+        register_menu_action(cx, &workspace, window, Self::on_toggle_sidebar_action);
+        register_menu_action(cx, &workspace, window, Self::on_toggle_detail_action);
+        register_menu_action(cx, &workspace, window, Self::on_open_from_disk_action);
+        register_menu_action(cx, &workspace, window, Self::on_synchronise_action);
+        register_menu_action(cx, &workspace, window, Self::on_use_light_theme_action);
+        register_menu_action(cx, &workspace, window, Self::on_use_dark_theme_action);
+        register_menu_action(cx, &workspace, window, Self::on_use_system_theme_action);
+        register_menu_action(cx, &workspace, window, Self::on_minimize_window_action);
+        register_menu_action(cx, &workspace, window, Self::on_zoom_window_action);
     }
 
     /// There is no bundled `Info.plist` for the native About panel to read, and the
@@ -1082,6 +1113,47 @@ impl Workspace {
     }
 }
 
+/// Binds one action to one [`Workspace`] method for the lifetime of the [`App`]; see
+/// [`Workspace::register_menu_actions`] for why the registration is global.
+///
+/// `cx` must be a real `&mut App`. [`Context`] derefs to [`App`] but carries its own
+/// inherent `on_action(TypeId, &mut Window, ..)`, which wins over [`App::on_action`] on a
+/// `Context` receiver — the same shadowing that `Context::on_app_quit` does to
+/// `App::on_app_quit`.
+///
+/// The handlers want a `&mut Window` that an [`App`] does not hold, and it cannot simply
+/// be fetched here: gpui dispatches an action from *inside* `App::update_window`, which
+/// moves the `Window` out of `App` for the duration, so a nested `window.update` finds
+/// nothing and fails with "window not found" — leaving a menu item that validates as
+/// enabled and then does nothing when clicked. Running the update through [`App::defer`],
+/// as `Window::dispatch_action` itself does, lets the dispatch unwind and put the window
+/// back first.
+fn register_menu_action<A: Action>(
+    cx: &mut App,
+    workspace: &WeakEntity<Workspace>,
+    window: AnyWindowHandle,
+    handler: impl Fn(&mut Workspace, &A, &mut Window, &mut Context<Workspace>) + 'static,
+) {
+    let workspace = workspace.clone();
+    let handler = Rc::new(handler);
+    cx.on_action(move |action: &A, cx: &mut App| {
+        let Some(workspace) = workspace.upgrade() else {
+            return;
+        };
+        let action = action.boxed_clone();
+        let handler = Rc::clone(&handler);
+        cx.defer(move |cx| {
+            let dispatched = window.update(cx, |_, window, cx| {
+                let action = action.as_any().downcast_ref::<A>().unwrap();
+                workspace.update(cx, |workspace, cx| handler(workspace, action, window, cx));
+            });
+            if let Err(error) = dispatched {
+                eprintln!("gitr: menu action went nowhere: {error:#}");
+            }
+        });
+    });
+}
+
 /// The filesystem path `RepositoryState::open` should read `source` from, and whether it
 /// should also watch that path for outside changes.
 ///
@@ -1502,7 +1574,6 @@ fn theme_transition_overlay(transition: &ThemeTransition) -> impl IntoElement {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity();
         let sidebar_collapsed = self.sidebar_collapsed;
         let dock_area = self.dock_area.clone();
         let close_selector = std::mem::take(&mut self.close_selector);
@@ -1535,16 +1606,6 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .on_action(window.listener_for(&entity, Self::on_about_action))
-            .on_action(window.listener_for(&entity, Self::on_toggle_sidebar_action))
-            .on_action(window.listener_for(&entity, Self::on_toggle_detail_action))
-            .on_action(window.listener_for(&entity, Self::on_open_from_disk_action))
-            .on_action(window.listener_for(&entity, Self::on_synchronise_action))
-            .on_action(window.listener_for(&entity, Self::on_use_light_theme_action))
-            .on_action(window.listener_for(&entity, Self::on_use_dark_theme_action))
-            .on_action(window.listener_for(&entity, Self::on_use_system_theme_action))
-            .on_action(window.listener_for(&entity, Self::on_minimize_window_action))
-            .on_action(window.listener_for(&entity, Self::on_zoom_window_action))
             .child(title_bar(
                 &repository_name,
                 &head,
@@ -1581,12 +1642,15 @@ impl Render for Workspace {
 mod tests {
     use super::*;
 
-    /// Every action a built menu tree references — submenus included — is one this file
-    /// or `crates/gitr/src/main.rs` registers a handler for. This cannot see `render`'s
-    /// own `.on_action` calls, which need a live window, so it checks the weaker but
-    /// still load-bearing half: that the menu never grows an item pointing at an action
-    /// absent from the fixed set this test — and a human reading a diff that adds to
-    /// `application_menus` without adding here — both have to keep in sync by hand.
+    /// Every action a built menu tree references — submenus included — is one
+    /// [`Workspace::register_menu_actions`] or `crates/gitr/src/main.rs` registers a
+    /// handler for. This cannot see either registration, both of which need a live `App`,
+    /// so it checks the weaker but still load-bearing half: that the menu never grows an
+    /// item pointing at an action absent from the fixed set this test — and a human
+    /// reading a diff that adds to `application_menus` without adding here — both have to
+    /// keep in sync by hand. Whether a registered handler is one a menu can actually
+    /// reach is a property of `App::is_action_available`, which no headless test can
+    /// evaluate; see [`Workspace::register_menu_actions`] for what makes it hold.
     #[test]
     fn every_menu_item_references_a_known_and_handled_action() {
         use gpui::Action;
