@@ -21,6 +21,11 @@ Milestone 1 — read and visualise. Not yet usable.
 cargo install --git https://github.com/LeadcodeDev/gitr
 ```
 
+A prebuilt Apple Silicon binary is attached to every [release](https://github.com/LeadcodeDev/gitr/releases).
+It is unsigned, so macOS quarantines it on download and it needs
+`xattr -d com.apple.quarantine gitr` before the first run — building it yourself avoids
+that, since nothing is downloaded.
+
 That installs one command, `gitr`:
 
 ```sh
