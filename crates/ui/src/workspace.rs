@@ -1,7 +1,7 @@
 //! Root view of a gitr window: title bar, sidebar, centre split and status bar.
 //!
 //! ```text
-//! ┌─ TitleBar : gitr — <repo> · <branch> ───────────────────── [theme ▾] ────┐
+//! ┌─ TitleBar : <repo> · <branch> ──────────────────────────── [theme ▾] ────┐
 //! ├───────────────┬──────────────────────────────┬──────────────────────────┤
 //! │ [repo ▾]      │ centre split: HistoryPanel    │ DetailPanel              │
 //! │ ▸ Working     │                               │                         │
@@ -211,6 +211,7 @@ pub struct Workspace {
     /// set while [`Self::cloning_project`] is still in flight, so the dropdown stays put
     /// while there is progress left to watch.
     close_selector: bool,
+    window_title: String,
     _save_layout_task: Option<Task<()>>,
     _appearance_subscription: Subscription,
     _dock_subscription: Subscription,
@@ -334,6 +335,7 @@ impl Workspace {
             cloning_project: None,
             synchronising: false,
             close_selector: false,
+            window_title: String::new(),
             _save_layout_task: None,
             _appearance_subscription: appearance_subscription,
             _dock_subscription: dock_subscription,
@@ -1353,14 +1355,7 @@ fn find_in_item<T: Panel>(item: &DockItem) -> Option<Entity<T>> {
     }
 }
 
-fn title_bar(
-    repository_name: &str,
-    head: &LoadState<HeadState>,
-    sidebar_collapsed: bool,
-    detail_visible: bool,
-    theme_preference: ThemePreference,
-    cx: &mut Context<Workspace>,
-) -> TitleBar {
+fn window_title(repository_name: &str, head: &LoadState<HeadState>) -> String {
     let branch = match head {
         LoadState::Ready(head) => head
             .branch()
@@ -1369,8 +1364,16 @@ fn title_bar(
         LoadState::Idle | LoadState::Loading => "…".to_string(),
         LoadState::Failed(_) => "unknown".to_string(),
     };
-    let title = format!("gitr — {repository_name} · {branch}");
+    format!("{repository_name} · {branch}")
+}
 
+fn title_bar(
+    title: &str,
+    sidebar_collapsed: bool,
+    detail_visible: bool,
+    theme_preference: ThemePreference,
+    cx: &mut Context<Workspace>,
+) -> TitleBar {
     TitleBar::new()
         .child(
             h_flex()
@@ -1390,7 +1393,7 @@ fn title_bar(
                             this.toggle_sidebar(cx);
                         })),
                 )
-                .child(div().text_sm().child(title)),
+                .child(div().text_sm().child(title.to_string())),
         )
         .child(
             h_flex()
@@ -1584,6 +1587,12 @@ impl Render for Workspace {
         let history = self.repository.read(cx).history().clone();
         let repository_name = active_repository_name(&self.projects, &path);
 
+        let title = window_title(&repository_name, &head);
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title.clone();
+        }
+
         let sheet_layer = Root::render_sheet_layer(window, cx);
         let dialog_layer = Root::render_dialog_layer(window, cx);
         let notification_layer = Root::render_notification_layer(window, cx);
@@ -1607,8 +1616,7 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .child(title_bar(
-                &repository_name,
-                &head,
+                &title,
                 sidebar_collapsed,
                 self.detail_slot.is_some(),
                 self.theme_preference,
