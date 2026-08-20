@@ -82,7 +82,7 @@ fn deleting_the_current_branch_switches_away_first() {
 }
 
 #[test]
-fn an_unmerged_branch_is_refused_and_named() {
+fn an_unmerged_branch_is_refused_with_its_reason() {
     let repository = init_repository();
     git(repository.path(), &["checkout", "-q", "-b", "feature"]);
     commit(repository.path(), "work only on feature");
@@ -93,7 +93,7 @@ fn an_unmerged_branch_is_refused_and_named() {
         .expect_err("git branch -d refuses to drop commits");
 
     assert!(
-        matches!(&error, BranchError::NotMerged { branch } if branch == "feature"),
+        matches!(&error, BranchError::NotMerged),
         "expected the unmerged case to be recognised rather than reported as a bare exit \
          status, got {error:?}"
     );

@@ -6,8 +6,8 @@ use super::runner::{GitProcessError, GitRunner};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BranchError {
-    #[error("{branch} is not fully merged")]
-    NotMerged { branch: String },
+    #[error("it is not fully merged")]
+    NotMerged,
     #[error("cannot leave the current branch for {target}: {stderr}")]
     SwitchRefused { target: String, stderr: String },
     #[error("git exited with status {status}: {stderr}")]
@@ -36,18 +36,16 @@ impl GitRunner {
 
         self.run(repository, &["branch", "-d", branch.as_str()])
             .map(|_| ())
-            .map_err(|error| classify(branch, error))
+            .map_err(classify)
     }
 }
 
-fn classify(branch: &BranchName, error: GitProcessError) -> BranchError {
+fn classify(error: GitProcessError) -> BranchError {
     match error {
         GitProcessError::Spawn(source) => BranchError::Unavailable(source.to_string()),
         GitProcessError::Failed { status, stderr } => {
             if stderr.to_lowercase().contains("not fully merged") {
-                BranchError::NotMerged {
-                    branch: branch.to_string(),
-                }
+                BranchError::NotMerged
             } else {
                 BranchError::Failed {
                     status,
