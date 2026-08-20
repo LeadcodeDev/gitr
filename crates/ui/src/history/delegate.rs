@@ -268,11 +268,7 @@ fn graph_cell(row: GraphRow, is_head: bool, theme: &ThemeColor) -> AnyElement {
                 );
                 let color = lane_color(segment.color, &theme);
 
-                let mut builder = PathBuilder::stroke(if top.x == bottom.x {
-                    geometry::LINE_WIDTH
-                } else {
-                    geometry::DIAGONAL_LINE_WIDTH
-                });
+                let mut builder = PathBuilder::stroke(geometry::LINE_WIDTH);
                 builder.move_to(top);
                 builder.line_to(bottom);
                 if let Ok(path) = builder.build() {

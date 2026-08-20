@@ -12,9 +12,9 @@ pub const LANE_SPACING: Pixels = px(12.);
 
 /// Outer radius of a commit's own node, which is the radius of its ring.
 ///
-/// Three quarters of a column, where GitX fills its column edge to edge. Its nodes in
-/// adjacent lanes touch; these leave a gap, which is what makes a run of parallel branches
-/// read as separate columns rather than as a band.
+/// One column less two pixels, so nodes in adjacent lanes keep a gap. GitX fills its column
+/// edge to edge and lets them touch; a gap is what makes a run of parallel branches read as
+/// separate columns rather than as a band.
 pub const NODE_RADIUS: Pixels = px(NODE_RADIUS_PX);
 
 /// Radius of the disc filling the node, leaving the ring between the two.
@@ -27,32 +27,32 @@ pub const NODE_INNER_RADIUS: Pixels = px(NODE_RADIUS_PX - NODE_RING_WIDTH_PX);
 /// be derived from another once wrapped.
 ///
 /// The ring is not itself a constant here because nothing paints it — it is what remains
-/// between the two discs, and it is GitX's own 1px.
+/// between the two discs.
 ///
-/// **Both constraints in [`node_radii_snap_to_the_same_pixel_grid`] are load-bearing, not
-/// tidiness.** The two discs are separate quads and each is snapped to the device grid on
-/// its own. A ring of 1.2px put their origins on different sub-pixel offsets, so they
-/// rounded in different directions and the fill landed half a pixel off centre — visible as
-/// a ring 2px thick on one side and 1px on the other. A whole-pixel ring and whole-pixel
-/// diameters make both discs round identically, which is the only way they stay concentric.
-const NODE_RADIUS_PX: f32 = 4.5;
+/// **Every one of these must be a whole number, and
+/// [`the_gutter_lands_whole_on_the_pixel_grid`] says why.** Each disc is a quad, each line
+/// is a stroked path, and every one of them is snapped to the device grid on its own. What
+/// gets snapped is a half-extent — a radius for a disc, half a width for a line — so two
+/// shapes centred on the same point stay centred together only when their half-extents share
+/// a fractional part. Two bugs came from breaking that: a 1.2px ring put the discs' origins
+/// on different offsets and the fill sat half a pixel off centre, and a radius of 4.5 against
+/// a half-line-width of 1.0 put the line half a pixel off the node it ran through.
+const NODE_RADIUS_PX: f32 = 5.0;
 const NODE_RING_WIDTH_PX: f32 = 2.0;
 
-/// Stroke width of a vertical graph line.
+/// Stroke width of every graph line, sloped or not.
 ///
 /// Matches the node's ring, which the pixel grid pins to a whole number: at 1.5 the line
 /// covered two columns at four fifths each, so it carried less ink than a 2px ring beside
 /// it and read lighter than the node it ran into. Two is also GitX's own `setLineWidth:2`.
-pub const LINE_WIDTH: Pixels = px(NODE_RING_WIDTH_PX);
-
-/// Stroke width of a sloped graph line.
 ///
-/// Wider than [`LINE_WIDTH`] on purpose. A vertical stroke lands square on the pixel grid
-/// and paints two columns at full strength; the same width on a diagonal spreads across
-/// three with two of them faint, so it carries the same ink and reads lighter. Matching
-/// the *perceived* weight is what the eye compares, not the declared width. The factor is
-/// the one that read right at 1.5, carried over rather than re-derived.
-pub const DIAGONAL_LINE_WIDTH: Pixels = px(NODE_RING_WIDTH_PX * 1.4);
+/// A sloped line was once painted wider than this. That compensated for a 1.5px vertical
+/// landing at partial opacity: nominal width and rendered weight disagreed, so a diagonal
+/// declared at the same number read lighter. At 2px the vertical lands as two solid
+/// columns and the two agree, which leaves nothing to compensate — widening the diagonal
+/// then just made it thicker. A 45° line does cover more *horizontal* pixels than a
+/// vertical one, five against two here, but that is the slope and not the weight.
+pub const LINE_WIDTH: Pixels = px(NODE_RING_WIDTH_PX);
 
 /// The x coordinate of `lane`'s centre, relative to the gutter's left edge.
 pub fn lane_center_x(lane: Lane, lane_spacing: Pixels) -> Pixels {
@@ -248,31 +248,28 @@ mod gutter_fit {
         }
     }
 
-    /// The two discs are painted as separate quads, each snapped to the device pixel grid
-    /// on its own. They stay concentric only if that snapping moves them identically, which
-    /// needs two things: whole-pixel diameters, so rounding the size is a no-op, and a
-    /// whole-pixel ring, so both origins sit at the same sub-pixel offset from the centre.
+    /// A node's two discs and the lines running through them are separate shapes, each
+    /// snapped to the device pixel grid on its own. What gets snapped is a half-extent —
+    /// a radius for a disc, half a width for a line — so shapes sharing a centre stay
+    /// centred together only when their half-extents share a fractional part. Whole numbers
+    /// throughout is the only value that holds for every pair at once.
     ///
-    /// A 1.2px ring broke the second one and put the fill half a pixel off, which reads as a
-    /// node drawn wrong rather than as a rounding artefact.
+    /// Both bugs this prevents looked like drawing errors rather than rounding: a 1.2px ring
+    /// put the fill half a pixel off centre, and a 4.5px radius against a 1px half-line-width
+    /// put the line half a pixel off the node it ran through.
     #[test]
-    fn node_radii_snap_to_the_same_pixel_grid() {
-        assert_eq!(
-            (NODE_RADIUS_PX * 2.).fract(),
-            0.,
-            "the outer diameter must be a whole number of pixels"
-        );
-        assert_eq!(
-            ((NODE_RADIUS_PX - NODE_RING_WIDTH_PX) * 2.).fract(),
-            0.,
-            "and so must the inner one"
-        );
-        assert_eq!(
-            NODE_RING_WIDTH_PX.fract(),
-            0.,
-            "a fractional ring puts the two origins on different sub-pixel offsets, and they \
-             then round apart"
-        );
+    fn the_gutter_lands_whole_on_the_pixel_grid() {
+        for (name, half_extent) in [
+            ("outer radius", NODE_RADIUS_PX),
+            ("inner radius", NODE_RADIUS_PX - NODE_RING_WIDTH_PX),
+            ("half a line's width", NODE_RING_WIDTH_PX / 2.),
+        ] {
+            assert_eq!(
+                half_extent.fract(),
+                0.,
+                "{name} is {half_extent}, which snaps against a whole one and lands off centre"
+            );
+        }
     }
 
     #[test]

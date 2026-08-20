@@ -165,13 +165,21 @@ upper half, `segments` for the lower — and correct columns are not enough on t
 segment spanning the whole band between two rows draws the right topology with every
 divergence starting a half-row below the node it comes from.
 
-**Two concentric quads stay concentric only on whole-pixel arithmetic.** A commit's node is
-a disc in the track's colour with a smaller one over it, and each quad is snapped to the
-device grid on its own. A 1.2px ring put the two origins on different sub-pixel offsets, so
-they rounded in opposite directions and the fill sat half a pixel off — on screen, a ring
-2px thick on one side and 1px on the other, which reads as a drawing bug rather than as
-rounding. Both diameters must be whole numbers and the ring between them must be a whole
-number too. `crates/ui/src/history/geometry.rs` asserts all three.
+**Every half-extent in the gutter must be a whole number of pixels.** A commit's node is a
+disc in the track's colour with a smaller one over it, and lines run through both. Each
+shape — quad or stroked path — is snapped to the device grid on its own, and what gets
+snapped is a *half-extent*: a radius for a disc, half a width for a line. Two shapes on the
+same centre therefore stay centred together only when their half-extents share a fractional
+part, and whole numbers is the only value that satisfies every pair at once.
+
+Two bugs came from breaking that, and both read as drawing errors rather than as rounding.
+A 1.2px ring put the two discs' origins on different offsets, so the fill sat half a pixel
+off — on screen, a ring 2px thick on one side and 1px on the other. Then a radius of 4.5
+against a half-line-width of 1.0 put every vertical line half a pixel off the node it ran
+through. `crates/ui/src/history/geometry.rs` asserts the rule over all three half-extents.
+
+The corollary is that a line's width is not free either: it must be even. That is why the
+gutter uses GitX's own `setLineWidth:2` rather than the 1.5 it started with.
 
 **Network and mutating Git operations go through subprocess `git`, never a library.**
 libssh2 does not read `~/.ssh/config`, so `Host` aliases and `ProxyCommand` silently break.
