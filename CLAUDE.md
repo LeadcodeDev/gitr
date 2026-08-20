@@ -81,11 +81,15 @@ and must be set explicitly here because this plate is black.
 **A macOS icon does not fill its canvas, and one that does looks the wrong size.** Measured
 on Mail, Messages, Music and Slack, each puts its artwork on 824 of 1024 pixels — 80.5% —
 and leaves the rest transparent. The dock lays out the canvas, not the artwork, so painting
-edge to edge puts the icon on a different grid from every neighbour. gitr ships 814px inset
-by 105 on a 1024 canvas; exactly 824 would need a fractional scale per grid unit, which
-destroys the pixel edges the mark is made of. The grid is 22 units so the plate's corner
-radius can land at 22.7% against Apple's 22.5% — on 11 units the only options were 18% and
-27%, both visibly wrong beside a system icon.
+edge to edge puts the icon on a different grid from every neighbour. gitr ships those exact
+numbers.
+
+**The plate is antialiased even though the crab is not.** Quantising the plate's corner to
+the crab's grid was tried and looks broken in the dock: every icon beside it has a smooth
+silhouette, so a stepped corner reads as a rendering fault rather than as a style. The
+plate is a superellipse of exponent 5 — Apple's silhouette runs its curvature continuously
+into the straight edge instead of meeting it at a tangent, which a rounded rectangle cannot
+do — sampled by sub-row rather than sub-pixel, since its half-width is analytic for any y.
 
 The generator uses the standard library only, encoding the PNG through `zlib` and `struct`.
 It previously shelled out to `rsvg-convert`, which meant nobody could regenerate the icon

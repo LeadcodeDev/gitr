@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
-"""Generates gitr's app icon: the ferrislabs crab on a black plate, as pixel art.
+"""Generates gitr's app icon: the ferrislabs crab on a black plate.
 
-The crab is not a redrawing. It is the organisation's own mark, lifted pixel for
-pixel from github.com/ferrislabs.png, which turns out to be a 9x9 grid in three
-colours. That economy is the whole reason it reads: nine pixels across leaves room
-for two raised claws, two eyes and a body, and nothing else survives at dock size
-anyway. Every hand-drawn crab attempted before this one was larger, more detailed,
-and read as a face.
+The crab is not a redrawing. It is lifted pixel for pixel from
+github.com/ferrislabs.png, which turns out to be a 9x9 grid in three colours. That
+economy is why it reads at dock size: nine pixels across leaves room for two raised
+claws, two eyes and a body, and nothing else survives anyway. Larger hand-drawn crabs
+were tried first and each one read as a face, the claws flattening into the body
+outline every time.
 
-One pixel differs from the original. The whites of the eyes are transparent there,
-because the avatar sits on GitHub's white plate; here the plate is black, so they
-are set to white explicitly or the eyes close up.
+One pixel departs from the original. The whites of the eyes are transparent there,
+because the avatar sits on GitHub's white plate; here the plate is black, so they are
+set explicitly or the eyes close up.
 
-Nothing is rasterised. Pixel art is placed, not sampled — feeding curves to a
-rasteriser at this size produces mush, which is how the previous vector icon could
-not simply be converted.
+The plate and the crab are drawn by different rules on purpose. The crab is hard-edged,
+every block an exact multiple of an output pixel. The plate is a smooth superellipse
+with antialiased edges, because macOS draws every icon beside it that way and a stepped
+corner among them reads as a rendering fault rather than as a style. An earlier version
+quantised the plate to the crab's grid and looked broken in the dock.
+
+Sizing follows Apple's grid rather than the canvas. Measured on Mail, Messages, Music
+and Slack, each puts its artwork on 824 of 1024 pixels and leaves the rest transparent;
+the dock lays out the canvas, so an icon painted to its own edges sits on a different
+grid from its neighbours and looks wrong whichever way it lands.
 
 Deliberately standard library only. The generator this replaced shelled out to
-`rsvg-convert`, so regenerating the icon needed a Homebrew package; a PNG encoder for
-flat colour is twenty lines, and no dependency beats a small one.
+`rsvg-convert`, so regenerating the icon needed a Homebrew package that nothing else in
+the tree requires.
 
     python3 make_icon.py        # rewrites icon.png
 """
@@ -29,29 +36,28 @@ import zlib
 
 HERE = pathlib.Path(__file__).parent
 
-# macOS does not fill the icon canvas. Measured on Mail, Messages, Music and Slack,
-# every one puts its artwork on 824 of 1024 pixels — 80.5% — and leaves the rest
-# transparent; the dock lays out the canvas, so an icon that fills its own reads at the
-# wrong size beside them. 22 grid units at 37 gives 814, inset by 105 on each side of a
-# 1024 canvas: 79.5%, within a percent of Apple's grid and, unlike 824, a whole number
-# of pixels per grid unit.
-GRID = 22
-SCALE = 37
 CANVAS = 1024
-PLATE_RADIUS = 5
+ART = 824
+INSET = (CANVAS - ART) // 2
 
-# The crab keeps its 9x9 structure but occupies two grid units per pixel. Drawing the
-# plate on the finer grid is what buys the corner radius: 5 of 22 is 22.7%, against
-# Apple's 22.5%, where 11 units could only offer 18% or 27%.
-CRAB_SCALE = 2
+# Apple's icon silhouette is a superellipse, not a rounded rectangle: the curvature runs
+# continuously into the straight edge instead of meeting it at a tangent. Five is the
+# exponent that matches macOS closely enough that the difference is invisible at any
+# size the dock draws.
+EXPONENT = 5.0
+SUBSAMPLES = 8
 
-PALETTE = {
-    ".": (0, 0, 0, 0),
-    "N": (0, 0, 0, 255),
-    "O": (242, 103, 15, 255),
-    "o": (168, 62, 8, 255),
-    "K": (28, 25, 23, 255),
-    "W": (255, 255, 255, 255),
+# 72 output pixels per crab pixel: 9 across is 648, which is 78.6% of the artwork
+# against 81.8% before. Both this and the 7-row height leave a whole number of pixels on
+# each side, so the crab centres exactly — a pixel off-centre is visible at this scale.
+BLOCK = 72
+
+PLATE = (0, 0, 0)
+COLOURS = {
+    "O": (242, 103, 15),
+    "o": (168, 62, 8),
+    "K": (28, 25, 23),
+    "W": (255, 255, 255),
 }
 
 CRAB = [
@@ -64,73 +70,91 @@ CRAB = [
     "o.OOOOO.o",
 ]
 
-# 18 wide and 14 tall on a 22 grid, so both offsets land on whole units and the crab
-# centres exactly. A pixel off-centre is visible at this scale and reads as a mistake.
-CRAB_AT = ((GRID - 9 * CRAB_SCALE) // 2, (GRID - 7 * CRAB_SCALE) // 2)
+
+def plate_alpha():
+    """Coverage per pixel for the superellipse, as a flat row-major list.
+
+    Sampled by sub-row rather than by sub-pixel: the shape's half-width is analytic for
+    any y, so each sub-row costs one power and a span of overlaps instead of sixty-four
+    inside-tests per pixel. That is the difference between a second and a minute.
+    """
+    alpha = [0.0] * (CANVAS * CANVAS)
+    half = ART / 2
+    centre = CANVAS / 2
+    for y in range(CANVAS):
+        row = y * CANVAS
+        for s in range(SUBSAMPLES):
+            dy = (y + (s + 0.5) / SUBSAMPLES) - centre
+            ratio = abs(dy) / half
+            if ratio >= 1.0:
+                continue
+            span = half * (1.0 - ratio**EXPONENT) ** (1.0 / EXPONENT)
+            left, right = centre - span, centre + span
+            for x in range(max(0, int(left)), min(CANVAS, int(right) + 1)):
+                covered = min(x + 1.0, right) - max(float(x), left)
+                if covered > 0:
+                    alpha[row + x] += covered / SUBSAMPLES
+    return alpha
 
 
-def plate(px, radius=PLATE_RADIUS):
-    """The rounded square macOS expects, corners stepped rather than antialiased —
-    a smooth corner beside hard-edged art reads as an accident."""
-    for y in range(GRID):
-        for x in range(GRID):
-            dx = max(radius - 1 - x, x - (GRID - radius), 0)
-            dy = max(radius - 1 - y, y - (GRID - radius), 0)
-            if dx * dx + dy * dy <= (radius - 1) * (radius - 1) + 1:
-                px[y][x] = "N"
-
-
-def crab(px):
-    ox, oy = CRAB_AT
-    for j, row in enumerate(CRAB):
-        for i, ch in enumerate(row):
+def crab_pixels():
+    """Maps every output pixel the crab covers to its colour, keyed by (x, y)."""
+    width, height = 9 * BLOCK, 7 * BLOCK
+    ox = INSET + (ART - width) // 2
+    oy = INSET + (ART - height) // 2
+    painted = {}
+    for j, line in enumerate(CRAB):
+        for i, ch in enumerate(line):
             if ch == ".":
                 continue
-            for dy in range(CRAB_SCALE):
-                for dx in range(CRAB_SCALE):
-                    px[oy + j * CRAB_SCALE + dy][ox + i * CRAB_SCALE + dx] = ch
+            colour = COLOURS[ch]
+            for y in range(oy + j * BLOCK, oy + (j + 1) * BLOCK):
+                for x in range(ox + i * BLOCK, ox + (i + 1) * BLOCK):
+                    painted[(x, y)] = colour
+    return painted
 
 
 def write_png(path, rows):
-    """Encodes RGBA without Pillow. Filter byte zero on every scanline: the image is a
-    handful of flat colours, so a filter would cost cycles and save nothing."""
-    raw = b"".join(b"\x00" + b"".join(bytes(p) for p in row) for row in rows)
+    """Encodes RGBA without Pillow. Filter byte zero on every scanline: the image is
+    flat colour over a single curved edge, so a filter would cost cycles and save
+    nothing."""
+    raw = b"".join(b"\x00" + bytes(row) for row in rows)
 
     def chunk(tag, payload):
         body = tag + payload
         return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
 
-    side = len(rows)
     path.write_bytes(
         b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", side, side, 8, 6, 0, 0, 0))
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", CANVAS, CANVAS, 8, 6, 0, 0, 0))
         + chunk(b"IDAT", zlib.compress(raw, 9))
         + chunk(b"IEND", b"")
     )
 
 
 def main():
-    px = [["." for _ in range(GRID)] for _ in range(GRID)]
-    plate(px)
-    crab(px)
+    alpha = plate_alpha()
+    crab = crab_pixels()
 
-    art = GRID * SCALE
-    inset = (CANVAS - art) // 2
-    blank = PALETTE["."]
-    rows = [
-        [
-            PALETTE[px[(y - inset) // SCALE][(x - inset) // SCALE]]
-            if inset <= x < inset + art and inset <= y < inset + art
-            else blank
-            for x in range(CANVAS)
-        ]
-        for y in range(CANVAS)
-    ]
+    rows = []
+    for y in range(CANVAS):
+        row = bytearray()
+        base = y * CANVAS
+        for x in range(CANVAS):
+            colour = crab.get((x, y))
+            if colour is not None:
+                row += bytes(colour) + b"\xff"
+            else:
+                a = alpha[base + x]
+                row += bytes(PLATE) + bytes((round(min(a, 1.0) * 255),))
+        rows.append(row)
+
     out = HERE / "icon.png"
     write_png(out, rows)
     print(
-        f"wrote {out.name}: {CANVAS}x{CANVAS} canvas, {art}px artwork "
-        f"({art / CANVAS:.1%}), inset {inset}, {out.stat().st_size} bytes"
+        f"wrote {out.name}: {CANVAS}x{CANVAS} canvas, {ART}px artwork "
+        f"({ART / CANVAS:.1%}), crab {9 * BLOCK}px ({9 * BLOCK / ART:.1%} of artwork), "
+        f"{out.stat().st_size} bytes"
     )
 
 
