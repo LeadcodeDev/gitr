@@ -1,7 +1,7 @@
 //! Root view of a gitr window: title bar, sidebar, centre split and status bar.
 //!
 //! ```text
-//! ┌─ TitleBar : gitr — <repo> · <branch> ───────────────────── [theme ▾] ────┐
+//! ┌─ TitleBar : <repo> · <branch> ──────────────────────────── [theme ▾] ────┐
 //! ├───────────────┬──────────────────────────────┬──────────────────────────┤
 //! │ [repo ▾]      │ centre split: HistoryPanel    │ DetailPanel              │
 //! │ ▸ Working     │                               │                         │
@@ -1364,7 +1364,7 @@ fn window_title(repository_name: &str, head: &LoadState<HeadState>) -> String {
         LoadState::Idle | LoadState::Loading => "…".to_string(),
         LoadState::Failed(_) => "unknown".to_string(),
     };
-    format!("gitr — {repository_name} · {branch}")
+    format!("{repository_name} · {branch}")
 }
 
 fn title_bar(
