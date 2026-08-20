@@ -12,16 +12,26 @@ pub const LANE_SPACING: Pixels = px(12.);
 
 /// Outer radius of a commit's own node, which is the radius of its ring.
 ///
-/// Half [`LANE_SPACING`], so a node spans its whole column and two nodes in adjacent
-/// columns just touch. GitX draws a 10px circle in a 10px column; this keeps that ratio.
-pub const NODE_RADIUS: Pixels = px(6.);
+/// Three quarters of a column, where GitX fills its column edge to edge. Its nodes in
+/// adjacent lanes touch; these leave a gap, which is what makes a run of parallel branches
+/// read as separate columns rather than as a band.
+pub const NODE_RADIUS: Pixels = px(NODE_RADIUS_PX);
 
-/// Radius of the disc filling the node, inside the ring.
+/// Radius of the disc filling the node, leaving the ring between the two.
 ///
-/// Four fifths of [`NODE_RADIUS`], GitX's ratio: it draws a 10px circle and a 8px one over
-/// it. The ring is what remains, and it is thin on purpose — thick enough to close the
-/// shape, not thick enough to read as the node itself.
-pub const NODE_INNER_RADIUS: Pixels = px(4.8);
+/// Subtracted from [`NODE_RADIUS`] rather than taken as a fraction of it, so shrinking the
+/// node keeps the ring at its width instead of thinning it away along with everything else.
+pub const NODE_INNER_RADIUS: Pixels = px(NODE_RADIUS_PX - NODE_RING_WIDTH_PX);
+
+/// The lengths above, before `px`: `Pixels` keeps its field private, so one constant cannot
+/// be derived from another once wrapped.
+///
+/// The ring is not itself a constant here because nothing paints it — it is what remains
+/// between the two discs. GitX's is 1px on a 10px node; this one is a touch wider because
+/// the node is smaller, and the ring is the only thing distinguishing a node from the line
+/// running through it.
+const NODE_RADIUS_PX: f32 = 4.5;
+const NODE_RING_WIDTH_PX: f32 = 1.2;
 
 /// Stroke width of a vertical graph line.
 pub const LINE_WIDTH: Pixels = px(1.5);
@@ -66,12 +76,14 @@ pub struct SegmentGeometry {
 /// ends or starts at that centre, which is what makes a line meet a node rather than pass
 /// beside it.
 ///
-/// The node carries no colour. GitX paints every node the same ring and the same fill,
-/// whatever track it belongs to, and reserves the palette for lines — [`GraphRow::color`]
-/// is therefore read for the segments and not for the node.
+/// `node_color` is the one departure from GitX here, which paints every ring black whatever
+/// track it belongs to. A ring in the track's own colour says which branch a commit is on
+/// without following its line up the gutter, and the hollow centre is what leaves room to
+/// say it — a filled disc in the same colour would read as the line, not as a node.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RowGeometry {
     pub node_center: Point<Pixels>,
+    pub node_color: LaneColor,
     pub incoming: Vec<SegmentGeometry>,
     pub outgoing: Vec<SegmentGeometry>,
 }
@@ -104,6 +116,7 @@ pub fn row_geometry(row: &GraphRow, row_height: Pixels, lane_spacing: Pixels) ->
 
     RowGeometry {
         node_center,
+        node_color: row.color,
         incoming,
         outgoing,
     }
@@ -226,16 +239,15 @@ mod gutter_fit {
     }
 
     #[test]
-    fn a_node_spans_its_whole_column_and_keeps_a_ring_inside_it() {
-        assert_eq!(
-            NODE_RADIUS * 2.,
-            LANE_SPACING,
-            "GitX draws a 10px node in a 10px column; changing the spacing alone would \
-             silently shrink the node against its neighbours"
+    fn a_node_stays_hollow_and_clear_of_its_neighbours() {
+        assert!(
+            NODE_INNER_RADIUS > Pixels::ZERO,
+            "shrinking the node past the ring's own width fills it in, and a filled disc in \
+             the track's colour reads as the line rather than as a node"
         );
         assert!(
-            NODE_INNER_RADIUS < NODE_RADIUS,
-            "the fill must leave a ring, or the node is a plain disc again"
+            NODE_RADIUS * 2. < LANE_SPACING,
+            "nodes in adjacent columns must not touch, or parallel branches read as a band"
         );
     }
 

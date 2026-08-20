@@ -39,9 +39,11 @@ const DATE_COLUMN_WIDTH: Pixels = px(84.);
 
 /// The fill GitX gives the checked-out commit's node, taken from `PBGitRevisionCell`.
 ///
-/// Deliberately not [`badges::CURRENT_BRANCH`], which is a stronger orange: that one is a
-/// plate behind white text and has to carry it, while this one sits inside a ring and has
-/// to leave it legible. Two jobs, two values, both meaning "this is where you are".
+/// The only node whose centre is filled: every other one is hollow, so this reads as a
+/// filled dot down the whole gutter without depending on the ring's colour, which now
+/// varies by track. Deliberately not [`badges::CURRENT_BRANCH`], the stronger orange — that
+/// one is a plate behind white text and has to carry it, while this one sits inside a
+/// coloured ring and has to leave it legible.
 const HEAD_NODE_FILL: u32 = 0xfca64f;
 
 pub(crate) struct HistoryTableDelegate {
@@ -289,8 +291,11 @@ fn graph_cell(row: GraphRow, is_head: bool, theme: &ThemeColor) -> AnyElement {
             };
 
             window.paint_quad(
-                fill(disc(geometry::NODE_RADIUS), theme.foreground)
-                    .corner_radii(geometry::NODE_RADIUS),
+                fill(
+                    disc(geometry::NODE_RADIUS),
+                    lane_color(row_geometry.node_color, &theme),
+                )
+                .corner_radii(geometry::NODE_RADIUS),
             );
             window.paint_quad(
                 fill(
