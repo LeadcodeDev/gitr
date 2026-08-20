@@ -6,7 +6,7 @@ use super::runner::{GitProcessError, GitRunner};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BranchError {
-    #[error("it is not fully merged")]
+    #[error("it has commits that are in no other branch")]
     NotMerged,
     #[error("cannot leave the current branch for {target}: {stderr}")]
     SwitchRefused { target: String, stderr: String },
@@ -22,6 +22,7 @@ impl GitRunner {
         repository: &Path,
         branch: &BranchName,
         switch_to: Option<&BranchName>,
+        integration: Option<&BranchName>,
     ) -> Result<(), BranchError> {
         if let Some(target) = switch_to {
             self.run(repository, &["checkout", target.as_str()])
@@ -34,8 +35,71 @@ impl GitRunner {
                 })?;
         }
 
-        self.run(repository, &["branch", "-d", branch.as_str()])
+        match self.run(repository, &["branch", "-d", branch.as_str()]) {
+            Ok(_) => Ok(()),
+            Err(error) => match classify(error) {
+                BranchError::NotMerged => self.delete_if_squash_merged(
+                    repository,
+                    branch,
+                    integration.ok_or(BranchError::NotMerged)?,
+                ),
+                other => Err(other),
+            },
+        }
+    }
+
+    fn delete_if_squash_merged(
+        &self,
+        repository: &Path,
+        branch: &BranchName,
+        integration: &BranchName,
+    ) -> Result<(), BranchError> {
+        if !self.is_squash_merged(repository, branch, integration)? {
+            return Err(BranchError::NotMerged);
+        }
+        self.run(repository, &["branch", "-D", branch.as_str()])
             .map(|_| ())
+            .map_err(classify)
+    }
+
+    pub fn is_squash_merged(
+        &self,
+        repository: &Path,
+        branch: &BranchName,
+        integration: &BranchName,
+    ) -> Result<bool, BranchError> {
+        if branch == integration {
+            return Ok(false);
+        }
+        let base = self.capture(
+            repository,
+            &["merge-base", integration.as_str(), branch.as_str()],
+        )?;
+        let tree = self.capture(repository, &["rev-parse", &format!("{branch}^{{tree}}")])?;
+        let base_tree = self.capture(repository, &["rev-parse", &format!("{base}^{{tree}}")])?;
+        if tree == base_tree {
+            return Ok(true);
+        }
+
+        let replay = self.capture(
+            repository,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &base,
+                "-m",
+                "gitr squash-merge probe",
+            ],
+        )?;
+        let cherry = self.capture(repository, &["cherry", integration.as_str(), &replay])?;
+
+        Ok(cherry.lines().all(|line| line.starts_with('-')) && !cherry.trim().is_empty())
+    }
+
+    fn capture(&self, repository: &Path, args: &[&str]) -> Result<String, BranchError> {
+        self.run(repository, args)
+            .map(|output| output.stdout.trim().to_string())
             .map_err(classify)
     }
 }

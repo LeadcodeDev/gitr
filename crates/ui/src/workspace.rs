@@ -575,10 +575,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let repository_path = self.repository.read(cx).path().to_path_buf();
+        let integration = self.fallback_branch(cx);
         let switch_to = self
             .head_branch_name(cx)
             .filter(|head| head == &branch)
-            .and_then(|_| self.fallback_branch(cx));
+            .and_then(|_| integration.clone());
 
         cx.spawn_in(window, async move |workspace, window| {
             let deleted = branch.clone();
@@ -589,6 +590,7 @@ impl Workspace {
                         &repository_path,
                         &branch,
                         switch_to.as_ref(),
+                        integration.as_ref(),
                     )
                 })
                 .await;

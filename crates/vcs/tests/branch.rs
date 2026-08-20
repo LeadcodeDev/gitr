@@ -61,7 +61,7 @@ fn a_merged_branch_is_deleted() {
     git(repository.path(), &["branch", "spare"]);
 
     GitRunner::new()
-        .delete_local_branch(repository.path(), &branch("spare"), None)
+        .delete_local_branch(repository.path(), &branch("spare"), None, None)
         .expect("a branch pointing at the same commit as main is merged, so -d accepts it");
 
     assert_eq!(local_branches(repository.path()), vec!["main".to_string()]);
@@ -74,7 +74,12 @@ fn deleting_the_current_branch_switches_away_first() {
     assert_eq!(current_branch(repository.path()), "feature");
 
     GitRunner::new()
-        .delete_local_branch(repository.path(), &branch("feature"), Some(&branch("main")))
+        .delete_local_branch(
+            repository.path(),
+            &branch("feature"),
+            Some(&branch("main")),
+            None,
+        )
         .expect("switching away leaves the branch deletable");
 
     assert_eq!(current_branch(repository.path()), "main");
@@ -89,7 +94,7 @@ fn an_unmerged_branch_is_refused_with_its_reason() {
     git(repository.path(), &["checkout", "-q", "main"]);
 
     let error = GitRunner::new()
-        .delete_local_branch(repository.path(), &branch("feature"), None)
+        .delete_local_branch(repository.path(), &branch("feature"), None, None)
         .expect_err("git branch -d refuses to drop commits");
 
     assert!(
@@ -110,7 +115,12 @@ fn a_refused_switch_leaves_the_branch_alone() {
     std::fs::write(repository.path().join("tracked.txt"), "uncommitted edit\n").unwrap();
 
     let error = GitRunner::new()
-        .delete_local_branch(repository.path(), &branch("feature"), Some(&branch("main")))
+        .delete_local_branch(
+            repository.path(),
+            &branch("feature"),
+            Some(&branch("main")),
+            None,
+        )
         .expect_err("checking out main would drop an uncommitted edit, so git refuses");
 
     assert!(
@@ -133,7 +143,7 @@ fn a_missing_branch_reports_git_own_reason() {
     let repository = init_repository();
 
     let error = GitRunner::new()
-        .delete_local_branch(repository.path(), &branch("never-existed"), None)
+        .delete_local_branch(repository.path(), &branch("never-existed"), None, None)
         .expect_err("git cannot delete what is not there");
 
     match error {
@@ -143,4 +153,105 @@ fn a_missing_branch_reports_git_own_reason() {
         ),
         other => panic!("expected the generic failure to carry git's own text, got {other:?}"),
     }
+}
+
+fn write(repository: &Path, name: &str, contents: &str) {
+    std::fs::write(repository.join(name), contents).unwrap();
+    git(repository, &["add", name]);
+}
+
+fn squash_merge(repository: &Path, feature: &str) {
+    git(repository, &["checkout", "-q", "main"]);
+    git(repository, &["merge", "--squash", feature]);
+    commit(repository, &format!("squash {feature}"));
+}
+
+#[test]
+fn a_squash_merged_branch_is_deleted_even_though_its_commits_are_not_ancestors() {
+    let repository = init_repository();
+    git(repository.path(), &["checkout", "-q", "-b", "feature"]);
+    write(repository.path(), "a.txt", "one\n");
+    commit(repository.path(), "first half");
+    write(repository.path(), "b.txt", "two\n");
+    commit(repository.path(), "second half");
+    squash_merge(repository.path(), "feature");
+
+    assert!(
+        git(repository.path(), &["branch", "--no-merged"]).contains("feature"),
+        "a squash merge lands a new commit, so git's ancestry test still calls the branch \
+         unmerged — which is the whole reason this case needs handling"
+    );
+
+    GitRunner::new()
+        .delete_local_branch(
+            repository.path(),
+            &branch("feature"),
+            None,
+            Some(&branch("main")),
+        )
+        .expect("its content is in main, so nothing is lost by deleting it");
+
+    assert_eq!(local_branches(repository.path()), vec!["main".to_string()]);
+}
+
+#[test]
+fn a_branch_with_work_of_its_own_survives_the_squash_check() {
+    let repository = init_repository();
+    git(repository.path(), &["checkout", "-q", "-b", "feature"]);
+    write(repository.path(), "a.txt", "one\n");
+    commit(repository.path(), "merged half");
+    squash_merge(repository.path(), "feature");
+    git(repository.path(), &["checkout", "-q", "feature"]);
+    write(repository.path(), "b.txt", "kept back\n");
+    commit(repository.path(), "not in main");
+    git(repository.path(), &["checkout", "-q", "main"]);
+
+    let error = GitRunner::new()
+        .delete_local_branch(
+            repository.path(),
+            &branch("feature"),
+            None,
+            Some(&branch("main")),
+        )
+        .expect_err("part of it is in main, which is not the same as all of it");
+
+    assert!(matches!(&error, BranchError::NotMerged), "got {error:?}");
+    assert!(local_branches(repository.path()).contains(&"feature".to_string()));
+}
+
+#[test]
+fn without_an_integration_branch_the_squash_check_is_not_attempted() {
+    let repository = init_repository();
+    git(repository.path(), &["checkout", "-q", "-b", "feature"]);
+    write(repository.path(), "a.txt", "one\n");
+    commit(repository.path(), "work");
+    squash_merge(repository.path(), "feature");
+
+    let error = GitRunner::new()
+        .delete_local_branch(repository.path(), &branch("feature"), None, None)
+        .expect_err("with nothing to compare against, the safe refusal stands");
+
+    assert!(matches!(&error, BranchError::NotMerged), "got {error:?}");
+}
+
+#[test]
+fn the_integration_branch_is_never_squash_merged_into_itself() {
+    let repository = init_repository();
+    git(repository.path(), &["checkout", "-q", "-b", "side"]);
+    git(repository.path(), &["checkout", "-q", "main"]);
+    write(repository.path(), "only-on-main.txt", "main moved on\n");
+    commit(repository.path(), "work main has and side does not");
+    git(repository.path(), &["checkout", "-q", "side"]);
+
+    let error = GitRunner::new()
+        .delete_local_branch(
+            repository.path(),
+            &branch("main"),
+            None,
+            Some(&branch("main")),
+        )
+        .expect_err("comparing main against itself always matches, which must not become a -D");
+
+    assert!(matches!(&error, BranchError::NotMerged), "got {error:?}");
+    assert!(local_branches(repository.path()).contains(&"main".to_string()));
 }
