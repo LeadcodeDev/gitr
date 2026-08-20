@@ -438,9 +438,9 @@ fn opening_a_sha256_repository_is_rejected() {
 
 /// The test that matters most in this workstream: a history where date order and
 /// topological order diverge, walked with [`domain::RepositoryReader::history`], must
-/// come back in the same order as `git log --topo-order`, not `git log --date-order`.
+/// come back in the same order as `git log --date-order`, not `git log --topo-order`.
 #[test]
-fn history_is_walked_in_topological_order_not_date_order() {
+fn history_is_walked_in_date_order_not_topological_order() {
     let dir = init_repo();
     let path = dir.path();
 
@@ -486,10 +486,11 @@ fn history_is_walked_in_topological_order_not_date_order() {
     let ids: Vec<_> = history.iter().map(|entry| entry.id).collect();
 
     assert_eq!(
-        ids, topo_order_via_git,
-        "history() must walk in the same topological order as `git log --topo-order`"
+        ids, date_order_via_git,
+        "history() must walk in the same date order as `git log --date-order`, which is \
+         what GitX shows and what the graph's shape is designed around"
     );
-    assert_ne!(ids, date_order_via_git);
+    assert_ne!(ids, topo_order_via_git);
 }
 
 #[test]

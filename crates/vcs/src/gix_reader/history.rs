@@ -14,7 +14,7 @@ pub(crate) fn walk(
     let tips = resolve_tips(repo, &request.scope)?;
     let topo_walk = topo::Builder::new(&repo.objects)
         .with_tips(tips)
-        .sorting(topo::Sorting::TopoOrder)
+        .sorting(topo::Sorting::DateOrder)
         .parents(TraverseParents::All)
         .build()
         .map_err(|err| backend("starting history walk", err))?;

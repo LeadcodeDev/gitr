@@ -129,11 +129,17 @@ issue #2754). On a large history that is an out-of-memory crash.
 
 **`TableDelegate::visible_rows_changed` runs every scroll frame.** Keep it allocation-free.
 
-**libgit2 cannot produce `--topo-order`.** Its `GIT_SORT_TOPOLOGICAL` yields `--date-order`.
-Commit order dominates graph readability — measured on `rust-lang/cargo`, 23 789 commits:
-date order gives 258 lanes, topological order with date priority gives 20. Read history
-through `gix_traverse::commit::topo::Builder`, which is not exposed on gix's high-level
-`rev_walk` builder.
+**History is walked in date order, matching GitX.** `gix_traverse::commit::topo::Builder`
+with `Sorting::DateOrder` reproduces `git rev-list --date-order` exactly — verified by
+diffing the two sequences over this repository. That builder is the way in either case: it
+is not exposed on gix's high-level `rev_walk`.
+
+The order was topological until the graph was rewritten, on a measurement that no longer
+holds: with the old lane-compacting layout, `rust-lang/cargo` at 23 789 commits gave 258
+lanes in date order against 20 topologically. Measured again on the current layout, where a
+track keeps its column, `zed-industries/zed` at 39 565 commits gives **13 columns in date
+order against 17 topologically** — date order is now the narrower of the two. Do not restore
+the old ordering on the strength of the old number; re-measure if it comes up.
 
 **Network and mutating Git operations go through subprocess `git`, never a library.**
 libssh2 does not read `~/.ssh/config`, so `Host` aliases and `ProxyCommand` silently break.
