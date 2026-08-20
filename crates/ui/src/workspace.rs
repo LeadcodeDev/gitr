@@ -219,7 +219,6 @@ pub struct Workspace {
     _history_panel_subscription: Subscription,
     _project_search_subscription: Subscription,
     _project_url_subscription: Subscription,
-    _window_closed_subscription: Subscription,
 }
 
 impl Workspace {
@@ -230,11 +229,12 @@ impl Workspace {
     /// directory whenever the persisted list it loads is empty, before this is ever
     /// called, so `projects` always has an active project by the time it gets here.
     ///
-    /// gitr opens exactly one window, so there is no "close this one, keep the others
-    /// running" case for it to leave open: `App::on_window_closed` firing for any window
-    /// closing is indistinguishable from *the* window closing here, and the `cx.quit()`
-    /// it calls runs the `on_app_quit` handler registered below before the process ends,
-    /// so the dock layout still gets its last save.
+    /// Several windows can be open at once, so nothing here reacts to a window closing:
+    /// `App::on_window_closed` fires for *any* window, and a handler registered per
+    /// workspace would quit the process the first time one of them was closed. When the
+    /// last one goes, gpui's `QuitMode::LastWindowClosed` — set in
+    /// `crates/gitr/src/main.rs` — calls `cx.quit()` itself, which still runs the
+    /// `on_app_quit` handler registered below and gives the dock layout its last save.
     pub fn new(projects: ProjectList, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let theme_preference = theme_preference_at_startup();
         apply_theme_preference(theme_preference, window, cx);
@@ -315,8 +315,6 @@ impl Workspace {
         })
         .detach();
 
-        let window_closed_subscription = cx.on_window_closed(|cx, _window_id| cx.quit());
-
         let workspace = Self {
             dock_area,
             projects,
@@ -343,7 +341,6 @@ impl Workspace {
             _history_panel_subscription: history_panel_subscription,
             _project_search_subscription: project_search_subscription,
             _project_url_subscription: project_url_subscription,
-            _window_closed_subscription: window_closed_subscription,
         };
         workspace.refresh_application_menus(cx);
         workspace

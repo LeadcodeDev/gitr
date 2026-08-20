@@ -26,6 +26,12 @@
 //! user is looking at. `GITR_FOREGROUND` marks the second process, and setting it by hand
 //! keeps everything in one attached process — the only way to see a panic or a log line.
 //!
+//! `QuitMode::LastWindowClosed` departs from the macOS convention deliberately. A native
+//! app keeps running with no windows, reachable through a New Window item; gitr has none,
+//! so an empty instance would be a dock icon the user can only quit. Closing the last
+//! window therefore ends the process — and only the last, which is what the per-workspace
+//! `on_window_closed` handler this replaced could not express.
+//!
 //! `cx.activate(true)` runs once the window exists, and is what puts gitr in front. macOS
 //! does not hand the foreground to a process launched from a terminal — the window opens
 //! behind the terminal and stays there — so the app has to ask, through
@@ -52,7 +58,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use domain::RepositoryError;
-use gpui::{App, AppContext, AsyncApp};
+use gpui::{App, AppContext, AsyncApp, QuitMode};
 use gpui_component::{Root, TitleBar};
 use ui::Workspace;
 use ui::actions::Quit;
@@ -125,6 +131,7 @@ fn main() -> ExitCode {
             gpui_component::init(cx);
             ui::init(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.set_quit_mode(QuitMode::LastWindowClosed);
             set_dock_icon();
 
             let projects = projects.clone();
