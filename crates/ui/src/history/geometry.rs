@@ -44,9 +44,14 @@ pub fn gutter_width(lane_count: u16, lane_spacing: Pixels) -> Pixels {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SegmentGeometry {
     pub top: Point<Pixels>,
+    /// Where the line stops running straight down and slants across, if it does.
+    ///
+    /// A lane change is a short slant near the edge rather than a lean across the whole
+    /// band: the line belongs to its lane, and reads as belonging to it, right up to the
+    /// point where it leaves.
+    pub bend: Option<Point<Pixels>>,
     pub bottom: Point<Pixels>,
     pub color: LaneColor,
-    pub is_vertical: bool,
 }
 
 /// Everything a renderer needs to paint one [`GraphRow`]'s band.
@@ -79,23 +84,39 @@ pub fn row_geometry(row: &GraphRow, row_height: Pixels, lane_spacing: Pixels) ->
 
     for segment in &row.segments {
         let is_outgoing = row.is_outgoing(segment);
+        let from_x = lane_center_x(segment.from, lane_spacing);
         let top = if is_outgoing {
             node_center
         } else {
-            point(lane_center_x(segment.from, lane_spacing), Pixels::ZERO)
-        };
-        let bottom_x = if is_outgoing && row.lands_on_next_node(segment) {
-            midpoint_x(segment.from, segment.to, lane_spacing)
-        } else {
-            lane_center_x(segment.to, lane_spacing)
+            point(from_x, Pixels::ZERO)
         };
 
-        let geometry = SegmentGeometry {
-            top,
-            bottom: point(bottom_x, row_height),
-            color: segment.color,
-            is_vertical: segment.is_vertical(),
+        let geometry = if segment.is_vertical() {
+            SegmentGeometry {
+                top,
+                bend: None,
+                bottom: point(from_x, row_height),
+                color: segment.color,
+            }
+        } else if is_outgoing && row.lands_on_next_node(segment) {
+            let edge_x = midpoint_x(segment.from, segment.to, lane_spacing);
+            let slant = slant_height(segment.from, segment.to, lane_spacing, row_height * 0.5);
+            SegmentGeometry {
+                top,
+                bend: Some(point(from_x, row_height - slant * 0.5)),
+                bottom: point(edge_x, row_height),
+                color: segment.color,
+            }
+        } else {
+            let slant = slant_height(segment.from, segment.to, lane_spacing, row_height - top.y);
+            SegmentGeometry {
+                top,
+                bend: Some(point(from_x, row_height - slant)),
+                bottom: point(lane_center_x(segment.to, lane_spacing), row_height),
+                color: segment.color,
+            }
         };
+
         if is_outgoing {
             outgoing.push(geometry);
         } else {
@@ -106,11 +127,22 @@ pub fn row_geometry(row: &GraphRow, row_height: Pixels, lane_spacing: Pixels) ->
     let incoming = row
         .incoming
         .iter()
-        .map(|link| SegmentGeometry {
-            top: point(midpoint_x(link.from, row.lane, lane_spacing), Pixels::ZERO),
-            bottom: node_center,
-            color: link.color,
-            is_vertical: link.from == row.lane,
+        .map(|link| {
+            if link.from == row.lane {
+                return SegmentGeometry {
+                    top: point(node_center.x, Pixels::ZERO),
+                    bend: None,
+                    bottom: node_center,
+                    color: link.color,
+                };
+            }
+            let slant = slant_height(link.from, row.lane, lane_spacing, row_height * 0.5);
+            SegmentGeometry {
+                top: point(midpoint_x(link.from, row.lane, lane_spacing), Pixels::ZERO),
+                bend: Some(point(node_center.x, slant * 0.5)),
+                bottom: node_center,
+                color: link.color,
+            }
         })
         .collect();
 
@@ -121,6 +153,16 @@ pub fn row_geometry(row: &GraphRow, row_height: Pixels, lane_spacing: Pixels) ->
         crossings,
         outgoing,
     }
+}
+
+/// How much vertical room a lane change is given before it must be complete.
+///
+/// One lane of sideways travel per lane of downward travel, so a slant sits at forty-five
+/// degrees however many lanes it crosses — and is clamped to the room actually available,
+/// which is what keeps a wide jump inside its band instead of running past the edge.
+fn slant_height(from: Lane, to: Lane, lane_spacing: Pixels, available: Pixels) -> Pixels {
+    let lanes = from.0.abs_diff(to.0).max(1) as usize;
+    (lane_spacing * lanes).min(available)
 }
 
 /// Where a line between two lane centres crosses the edge between two row bands.
@@ -231,6 +273,23 @@ mod tests {
         assert_eq!(leaves.top, top_half.node_center);
         assert_eq!(arrives.bottom, bottom_half.node_center);
         assert_eq!(leaves.bottom.x, px(16.));
+
+        let leaves_bend = leaves
+            .bend
+            .expect("the upper half runs straight down first");
+        let arrives_bend = arrives.bend.expect("the lower half straightens up again");
+        assert_eq!(
+            leaves_bend.x, leaves.top.x,
+            "the line must stay in its own lane until it bends"
+        );
+        assert_eq!(
+            arrives_bend.x, arrives.bottom.x,
+            "and must be back in the destination lane before reaching the node"
+        );
+        assert!(
+            leaves_bend.y > leaves.top.y,
+            "the vertical run comes before the slant, not after"
+        );
     }
 
     #[test]
@@ -256,7 +315,7 @@ mod tests {
         assert!(geometry.outgoing.is_empty());
 
         let crossing = geometry.crossings[0];
-        assert!(crossing.is_vertical);
+        assert_eq!(crossing.bend, None);
         assert_eq!(crossing.top, point(px(8.), px(0.)));
         assert_eq!(crossing.bottom, point(px(8.), px(24.)));
     }
@@ -267,7 +326,7 @@ mod tests {
 
         assert_eq!(geometry.incoming.len(), 1);
         let stub = geometry.incoming[0];
-        assert!(stub.is_vertical);
+        assert_eq!(stub.bend, None);
         assert_eq!(stub.top, point(px(24.), px(0.)));
         assert_eq!(
             stub.bottom, geometry.node_center,

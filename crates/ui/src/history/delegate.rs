@@ -246,17 +246,29 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
                 );
                 let color = lane_color(segment.color, &theme);
 
-                let width = if segment.is_vertical {
-                    geometry::LINE_WIDTH
-                } else {
-                    geometry::DIAGONAL_LINE_WIDTH
+                let bend = segment
+                    .bend
+                    .map(|bend| point(bounds.origin.x + bend.x, bounds.origin.y + bend.y));
+                let legs = match bend {
+                    Some(bend) => vec![(top, bend), (bend, bottom)],
+                    None => vec![(top, bottom)],
                 };
-                let mut builder = PathBuilder::stroke(width);
-                builder.move_to(top);
-                builder.line_to(bottom);
 
-                if let Ok(path) = builder.build() {
-                    window.paint_path(path, color);
+                for (start, end) in legs {
+                    if start == end {
+                        continue;
+                    }
+                    let width = if start.x == end.x {
+                        geometry::LINE_WIDTH
+                    } else {
+                        geometry::DIAGONAL_LINE_WIDTH
+                    };
+                    let mut builder = PathBuilder::stroke(width);
+                    builder.move_to(start);
+                    builder.line_to(end);
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, color);
+                    }
                 }
             }
 
