@@ -37,16 +37,6 @@ impl Segment {
     }
 }
 
-/// A line arriving at a commit's node from the row above.
-///
-/// `from` is the lane it occupied up there, which is what lets the renderer continue the
-/// line at the same slope rather than restarting it vertically.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IncomingLink {
-    pub from: Lane,
-    pub color: LaneColor,
-}
-
 /// One commit's placement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphRow {
@@ -55,40 +45,25 @@ pub struct GraphRow {
     pub lane: Lane,
     /// Colour of the node itself, which is the colour of the lane it continues.
     pub color: LaneColor,
+    /// Lines crossing the lower half, from the row's own centre down to its bottom edge.
+    ///
+    /// `from` is the column at the centre, `to` the column at the edge. They differ only
+    /// for a merge's second parent, which leaves the node sideways.
     pub segments: Vec<Segment>,
-    /// The lines the row above sends into this commit's node, empty on a branch tip.
+    /// Lines crossing the upper half, from the top edge down to the row's own centre.
     ///
-    /// A tip is pointed at by nothing, so a renderer that drew a stub unconditionally
-    /// would grow a line above it leading nowhere.
-    pub incoming: Vec<IncomingLink>,
-    /// The lane of the row below, absent on the last row of the walk.
-    ///
-    /// A link to a parent one row down is drawn as a single straight line between two
-    /// nodes, and a row band can only paint its own half of it. Both halves have to agree
-    /// on where they meet, so each needs to know the other's lane.
-    pub next_lane: Option<Lane>,
+    /// Empty on a branch tip, which nothing points at from above.
+    pub incoming: Vec<Segment>,
 }
 
 impl GraphRow {
-    /// Whether `segment` is this commit's own link to a parent rather than an unrelated
-    /// lane crossing the band.
+    /// Whether any line from the row above reaches this commit's own node.
     ///
-    /// The distinction is what stops a line from being drawn through a node: an outgoing
-    /// link starts at the node's centre, half a band below where a crossing line enters.
-    pub fn is_outgoing(&self, segment: &Segment) -> bool {
-        segment.from == self.lane
-    }
-
-    /// Whether `segment` lands on the node of the row immediately below.
-    ///
-    /// Only such a segment bends at the band edge; one merely reserving a lane for a
-    /// commit further down stays in that lane and meets a vertical there.
-    pub fn lands_on_next_node(&self, segment: &Segment) -> bool {
-        self.next_lane == Some(segment.to)
-    }
-
+    /// Not the same as having incoming lines at all: a row carries one for every column
+    /// crossing it, and a branch tip is crossed by its neighbours while nothing points at
+    /// the tip itself.
     pub fn has_incoming(&self) -> bool {
-        !self.incoming.is_empty()
+        self.incoming.iter().any(|segment| segment.to == self.lane)
     }
 }
 

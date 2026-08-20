@@ -17,9 +17,8 @@ pub enum HistoryScope {
 
 /// A history read.
 ///
-/// Order is not a parameter. A walk is always topological with date priority, because
-/// commit order dominates graph readability — 258 lanes against 20 on a 23 789-commit
-/// history — and a caller has no reason to ask for the unreadable one.
+/// Order is not a parameter. A walk is always date-ordered, matching `git rev-list
+/// --date-order` and GitX, and a caller has no reason to ask for anything else.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryRequest {
     pub scope: HistoryScope,

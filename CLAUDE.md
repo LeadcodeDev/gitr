@@ -129,11 +129,57 @@ issue #2754). On a large history that is an out-of-memory crash.
 
 **`TableDelegate::visible_rows_changed` runs every scroll frame.** Keep it allocation-free.
 
-**libgit2 cannot produce `--topo-order`.** Its `GIT_SORT_TOPOLOGICAL` yields `--date-order`.
-Commit order dominates graph readability — measured on `rust-lang/cargo`, 23 789 commits:
-date order gives 258 lanes, topological order with date priority gives 20. Read history
-through `gix_traverse::commit::topo::Builder`, which is not exposed on gix's high-level
-`rev_walk` builder.
+**History is walked in date order, matching GitX.** `gix_traverse::commit::topo::Builder`
+with `Sorting::DateOrder` reproduces `git rev-list --date-order` exactly — verified by
+diffing the two sequences over this repository. That builder is the way in either case: it
+is not exposed on gix's high-level `rev_walk`.
+
+The order was topological until the graph was made to match GitX. An older measurement
+argued for it — `rust-lang/cargo` at 23 789 commits, 258 lanes in date order against 20
+topologically — and it was taken before the walk seeded from every reference, so it does
+not describe this code. Measured on the current code, `zed-industries/zed` at 39 565
+commits gives **13 columns in date order against 17 topologically**: date order is the
+narrower of the two here. Do not restore the old ordering on the strength of the old
+number; re-measure if it comes up.
+
+**Lane placement is a port of GitX's `PBGitGrapher.decorateCommit`, not an adaptation.**
+Columns compact — a row's are rebuilt by walking the previous row's and appending the
+survivors, so a column is a position among them and everything right of an ending track
+slides left. Giving each track a column it keeps was tried and reverted: easier to follow,
+but not what GitX draws.
+
+Two details carry the whole difference, and both were got wrong before being ported
+faithfully. **A commit's node sits at its index in the outgoing column list, not the
+incoming one** — they agree until a column dies in the same row a tip appears. And
+**convergence is deferred**: a first parent takes over its lane without checking whether
+another column already expects it, so two columns hold the same object until the row that
+places it. Converging eagerly closes a column a row early and shifts everything right of
+it. Verify any change here by running GitX's algorithm over a real history and diffing the
+column of every commit — ten of this repository's 53 were off by one before the port, and
+patching rather than porting took it to eighteen.
+
+**A graph line bends nowhere.** `PBGitRevisionCell.drawLineFromColumn` draws one straight
+line from a cell edge to that cell's own centre, so a change of column happens over half a
+row and every line ends *on* a node. `GraphRow` is split to match — `incoming` for the
+upper half, `segments` for the lower — and correct columns are not enough on their own: a
+segment spanning the whole band between two rows draws the right topology with every
+divergence starting a half-row below the node it comes from.
+
+**Every half-extent in the gutter must be a whole number of pixels.** A commit's node is a
+disc in the track's colour with a smaller one over it, and lines run through both. Each
+shape — quad or stroked path — is snapped to the device grid on its own, and what gets
+snapped is a *half-extent*: a radius for a disc, half a width for a line. Two shapes on the
+same centre therefore stay centred together only when their half-extents share a fractional
+part, and whole numbers is the only value that satisfies every pair at once.
+
+Two bugs came from breaking that, and both read as drawing errors rather than as rounding.
+A 1.2px ring put the two discs' origins on different offsets, so the fill sat half a pixel
+off — on screen, a ring 2px thick on one side and 1px on the other. Then a radius of 4.5
+against a half-line-width of 1.0 put every vertical line half a pixel off the node it ran
+through. `crates/ui/src/history/geometry.rs` asserts the rule over all three half-extents.
+
+The corollary is that a line's width is not free either: it must be even. That is why the
+gutter uses GitX's own `setLineWidth:2` rather than the 1.5 it started with.
 
 **Network and mutating Git operations go through subprocess `git`, never a library.**
 libssh2 does not read `~/.ssh/config`, so `Host` aliases and `ProxyCommand` silently break.

@@ -1,208 +1,173 @@
-//! Track placement: assigns each commit a lane and the segments its row draws.
+//! Track placement, ported from GitX's `PBGitGrapher.decorateCommit`.
 //!
-//! The model is git's own `graph.c`: a lane is a reservation holding the [`ObjectId`] of
-//! the next commit expected in that column. Walking the input in order, a commit is placed
-//! into the column that already expects it, or into a freshly opened one if no column does.
-//! Its parents then take over columns for the rows below: a parent that some other column
-//! already expects converges onto that column instead of opening a new one, which is what
-//! makes two diverging tracks reconverge onto a shared ancestor. A column whose commit has
-//! no parents (`Parents::Root`) is dropped rather than carried forward, which frees the lane
-//! for a later, unrelated track to reuse.
+//! A lane is a column holding the [`ObjectId`] it expects next. Each row rebuilds the
+//! column list by walking the previous one and appending whatever survives, so a column is
+//! a position among survivors and everything right of an ending track slides left. A
+//! commit's own node is placed at its index in the *outgoing* list, not the incoming one —
+//! that distinction is the whole reason this is a port rather than an adaptation, and it
+//! is what a comparison against GitX's output turns on.
+//!
+//! Convergence is deferred. A commit's first parent takes over its lane without checking
+//! whether another column already expects that parent; two columns then hold the same
+//! object until the row that places it, and that row is where they meet. Converging
+//! eagerly instead closes a column one row early and shifts everything to its right.
+//!
+//! A commit with no parents leaves a hole rather than closing its column, so the columns
+//! beside it keep their positions for one more row.
 
 use domain::{CommitSummary, ObjectId};
 
-use crate::model::{GraphLayout, GraphRow, IncomingLink, Lane, LaneColor, PALETTE_SIZE, Segment};
+use crate::model::{GraphLayout, GraphRow, Lane, LaneColor, PALETTE_SIZE, Segment};
 
-/// A column's current reservation: the commit it expects next, and the colour that column
-/// has carried since the track using it was opened.
 #[derive(Clone, Copy)]
 struct Track {
     commit: ObjectId,
     color: LaneColor,
 }
 
-/// Assigns a lane to every commit and records, per row, the segments the row's band draws.
-///
-/// `commits` must already be topologically ordered with date priority: a commit appears
-/// before every one of its ancestors. Placement does not verify this and produces a
-/// misleading layout if it is violated — the crate-level docs explain why order is not
-/// this function's job.
-///
-/// Runs in `O(commits.len() * peak_width)` with a `HashMap` lookup per column visited per
-/// row, since each row rebuilds its column list from the one above by scanning it once.
-///
-/// A segment is drawn in the colour of the track it *continues*, never the one it lands
-/// on. A commit's first-parent link continues its own track, so it keeps the commit's
-/// colour even where it converges into a lane another track already holds — otherwise a
-/// branch runs in its own colour for its whole length and then changes colour on the one
-/// segment that reaches the branch it rejoins, which reads as the branch ending a row
-/// early. A second-parent link is the other case: it does not continue the merge commit's
-/// track, it reaches into the track being merged, so it takes that track's colour.
+/// One row's placement, before the rows below it are known.
+struct Placement {
+    /// Where this commit's node sits, as an index into the outgoing column list.
+    position: usize,
+    color: LaneColor,
+    /// Incoming column to outgoing column, one entry per line crossing the row.
+    mapping: Vec<Segment>,
+    /// Columns this commit opened for a second or later parent, with their colours.
+    spawned: Vec<(usize, LaneColor)>,
+    has_parents: bool,
+}
+
 pub fn layout(commits: &[CommitSummary]) -> GraphLayout {
-    let mut tracks: Vec<Option<Track>> = Vec::new();
-    let mut rows: Vec<GraphRow> = Vec::with_capacity(commits.len());
+    let mut lanes: Vec<Option<Track>> = Vec::new();
+    let mut placements: Vec<Placement> = Vec::with_capacity(commits.len());
     let mut width: u16 = 0;
     let mut palette_cursor: u8 = 0;
 
     for commit in commits {
-        let expecting = column_expecting(&tracks, commit.id);
-        let was_reserved = expecting.is_some();
-        let (lane_index, commit_color) = match expecting {
-            Some(found) => found,
-            None => {
+        let mut next: Vec<Option<Track>> = Vec::with_capacity(lanes.len() + 1);
+        let mut mapping: Vec<Segment> = Vec::with_capacity(lanes.len() + 1);
+        let mut position: Option<usize> = None;
+        let mut color: Option<LaneColor> = None;
+
+        for (index, slot) in lanes.iter().enumerate() {
+            let Some(track) = slot else { continue };
+            let to = if track.commit == commit.id {
+                match position {
+                    None => {
+                        next.push(Some(*track));
+                        let at = next.len() - 1;
+                        position = Some(at);
+                        color = Some(track.color);
+                        at
+                    }
+                    Some(at) => at,
+                }
+            } else {
+                next.push(Some(*track));
+                next.len() - 1
+            };
+            mapping.push(Segment {
+                from: Lane(index as u16),
+                to: Lane(to as u16),
+                color: track.color,
+            });
+        }
+
+        let (position, color) = match (position, color) {
+            (Some(at), Some(color)) => (at, color),
+            _ => {
                 let color = allocate_color(&mut palette_cursor);
-                let index = free_column(&mut tracks);
-                tracks[index] = Some(Track {
+                next.push(Some(Track {
                     commit: commit.id,
                     color,
-                });
-                (index, color)
+                }));
+                (next.len() - 1, color)
             }
         };
 
-        let mut next = tracks.clone();
-        next[lane_index] = None;
+        let mut parents = commit.parents.iter();
+        next[position] = parents.next().map(|parent| Track {
+            commit: parent,
+            color,
+        });
 
-        let mut parent_links: Vec<Segment> = Vec::with_capacity(commit.parents.len());
-        let mut convergences: Vec<Segment> = Vec::new();
-
-        for (parent_index, parent) in commit.parents.iter().enumerate() {
-            let first = parent_index == 0;
-            let waiting = columns_expecting(&next, parent);
-            let target = match (first, waiting.first()) {
-                (true, Some(&leftmost)) => leftmost.min(lane_index),
-                (true, None) => lane_index,
-                (false, Some(&leftmost)) => leftmost,
-                (false, None) => free_column(&mut next),
-            };
-
-            for &column in waiting.iter().filter(|&&column| column != target) {
-                if let Some(track) = next[column] {
-                    convergences.push(Segment {
-                        from: Lane(column as u16),
-                        to: Lane(target as u16),
-                        color: track.color,
-                    });
-                }
-                next[column] = None;
-            }
-
-            let track_color = match next[target] {
-                Some(track) => track.color,
-                None if first => commit_color,
-                None => allocate_color(&mut palette_cursor),
-            };
-            next[target] = Some(Track {
-                commit: parent,
-                color: track_color,
-            });
-            parent_links.push(Segment {
-                from: Lane(lane_index as u16),
-                to: Lane(target as u16),
-                color: if first { commit_color } else { track_color },
-            });
-        }
-
-        let mut segments: Vec<Segment> = Vec::with_capacity(tracks.len());
-        for (index, slot) in tracks.iter().enumerate() {
-            if index == lane_index {
-                segments.extend(parent_links.iter().copied());
+        let mut spawned = Vec::new();
+        for parent in parents {
+            if next
+                .iter()
+                .any(|slot| slot.is_some_and(|track: Track| track.commit == parent))
+            {
                 continue;
             }
-            let Some(track) = slot else { continue };
-            match convergences
-                .iter()
-                .find(|segment| segment.from.0 as usize == index)
-            {
-                Some(converged) => segments.push(*converged),
-                None => segments.push(Segment {
-                    from: Lane(index as u16),
-                    to: Lane(index as u16),
-                    color: track.color,
-                }),
+            let color = allocate_color(&mut palette_cursor);
+            next.push(Some(Track {
+                commit: parent,
+                color,
+            }));
+            spawned.push((next.len() - 1, color));
+        }
+
+        width = width.max(lanes.len() as u16).max(next.len() as u16);
+        placements.push(Placement {
+            position,
+            color,
+            mapping,
+            spawned,
+            has_parents: !commit.parents.is_empty(),
+        });
+        lanes = next;
+    }
+
+    let rows = assemble(commits, &placements);
+    GraphLayout { rows, width }
+}
+
+/// Turns per-row placements into rows, split the way GitX draws a cell: one set of lines
+/// crossing the upper half into the row's centre, one crossing the lower half out of it.
+///
+/// A line that changes column does so in the upper half, arriving at the centre already in
+/// its new one. The lower half is therefore vertical, except for a merge's second parent,
+/// which leaves the node sideways.
+fn assemble(commits: &[CommitSummary], placements: &[Placement]) -> Vec<GraphRow> {
+    let mut rows = Vec::with_capacity(commits.len());
+
+    for (commit, placement) in commits.iter().zip(placements) {
+        let lane = Lane(placement.position as u16);
+
+        let mut segments: Vec<Segment> = Vec::with_capacity(placement.mapping.len());
+        for segment in &placement.mapping {
+            if segments.iter().any(|kept: &Segment| kept.to == segment.to) {
+                continue;
             }
+            segments.push(Segment {
+                from: segment.to,
+                to: segment.to,
+                color: segment.color,
+            });
         }
-
-        trim_trailing_free(&mut next);
-        width = width.max(tracks.len() as u16).max(next.len() as u16);
-
-        let lane = Lane(lane_index as u16);
-        let incoming = if was_reserved {
-            rows.last().map_or_else(Vec::new, |previous: &GraphRow| {
-                previous
-                    .segments
-                    .iter()
-                    .filter(|segment| segment.to == lane)
-                    .map(|segment| IncomingLink {
-                        from: segment.from,
-                        color: segment.color,
-                    })
-                    .collect()
-            })
-        } else {
-            Vec::new()
-        };
-
-        if let Some(previous) = rows.last_mut() {
-            previous.next_lane = Some(lane);
+        if placement.has_parents && !segments.iter().any(|segment| segment.to == lane) {
+            segments.push(Segment {
+                from: lane,
+                to: lane,
+                color: placement.color,
+            });
         }
+        segments.retain(|segment| placement.has_parents || segment.to != lane);
+        segments.extend(placement.spawned.iter().map(|&(column, color)| Segment {
+            from: lane,
+            to: Lane(column as u16),
+            color,
+        }));
 
         rows.push(GraphRow {
             commit: commit.id,
             lane,
-            color: commit_color,
+            color: placement.color,
             segments,
-            incoming,
-            next_lane: None,
+            incoming: placement.mapping.clone(),
         });
-
-        tracks = next;
     }
-
-    GraphLayout { rows, width }
-}
-
-/// Every column waiting for `commit`, leftmost first.
-///
-/// More than one can be waiting: two tracks reaching the same ancestor both hold it until
-/// the row that places it, and that row is where they converge.
-fn columns_expecting(tracks: &[Option<Track>], commit: ObjectId) -> Vec<usize> {
-    tracks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, slot)| slot.filter(|track| track.commit == commit).map(|_| index))
-        .collect()
-}
-
-/// The column already waiting for `commit`, with the colour it has carried.
-fn column_expecting(tracks: &[Option<Track>], commit: ObjectId) -> Option<(usize, LaneColor)> {
-    tracks.iter().enumerate().find_map(|(index, slot)| {
-        slot.filter(|track| track.commit == commit)
-            .map(|track| (index, track.color))
-    })
-}
-
-/// The leftmost column no track is using, opening one on the right if all are taken.
-///
-/// A column is only ever handed to a track that is starting. One already running keeps
-/// its column for its whole life, which is the point: a branch that shifts sideways every
-/// time an unrelated track ends is one the eye cannot follow.
-fn free_column(tracks: &mut Vec<Option<Track>>) -> usize {
-    match tracks.iter().position(Option::is_none) {
-        Some(index) => index,
-        None => {
-            tracks.push(None);
-            tracks.len() - 1
-        }
-    }
-}
-
-/// Drops columns freed at the right-hand end, so the gutter is only as wide as the
-/// tracks actually reach.
-fn trim_trailing_free(tracks: &mut Vec<Option<Track>>) {
-    while tracks.last().is_some_and(Option::is_none) {
-        tracks.pop();
-    }
+    rows
 }
 
 /// Hands out the next palette slot, cycling through [`PALETTE_SIZE`] colours.

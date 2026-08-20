@@ -37,12 +37,22 @@ const SUBJECT_COLUMN_WIDTH: Pixels = px(420.);
 const AUTHOR_COLUMN_WIDTH: Pixels = px(150.);
 const DATE_COLUMN_WIDTH: Pixels = px(84.);
 
+/// The fill GitX gives the checked-out commit's node, taken from `PBGitRevisionCell`.
+///
+/// The only node whose centre is filled: every other one is hollow, so this reads as a
+/// filled dot down the whole gutter without depending on the ring's colour, which now
+/// varies by track. Deliberately not [`badges::CURRENT_BRANCH`], the stronger orange — that
+/// one is a plate behind white text and has to carry it, while this one sits inside a
+/// coloured ring and has to leave it legible.
+const HEAD_NODE_FILL: u32 = 0xfca64f;
+
 pub(crate) struct HistoryTableDelegate {
     history: LoadState<Arc<History>>,
     filter: HistoryFilter,
     visible_indices: Vec<usize>,
     graph_width: Pixels,
     head_branch: Option<BranchName>,
+    head_commit: Option<ObjectId>,
 }
 
 impl HistoryTableDelegate {
@@ -53,11 +63,13 @@ impl HistoryTableDelegate {
             visible_indices: Vec::new(),
             graph_width: geometry::LANE_SPACING,
             head_branch: None,
+            head_commit: None,
         }
     }
 
-    pub(crate) fn set_head_branch(&mut self, head_branch: Option<BranchName>) {
-        self.head_branch = head_branch;
+    pub(crate) fn set_head(&mut self, branch: Option<BranchName>, commit: Option<ObjectId>) {
+        self.head_branch = branch;
+        self.head_commit = commit;
     }
 
     pub(crate) fn set_history(&mut self, history: LoadState<Arc<History>>) {
@@ -197,7 +209,7 @@ impl TableDelegate for HistoryTableDelegate {
         match col_ix {
             SHA_COLUMN => sha_cell(commit, &theme),
             GRAPH_COLUMN => match history.layout.rows.get(commit_ix) {
-                Some(row) => graph_cell(row.clone(), &theme),
+                Some(row) => graph_cell(row.clone(), self.head_commit == Some(commit.id), &theme),
                 None => div().into_any_element(),
             },
             SUBJECT_COLUMN => subject_cell(
@@ -231,7 +243,7 @@ fn sha_cell(commit: &CommitSummary, theme: &ThemeColor) -> AnyElement {
 /// total width instead — the two are equal only for a single-lane history, so every
 /// branchier repository silently placed lane 1 beyond the cell and clipped it away, node
 /// and line together. There is exactly one correct value, so the parameter is gone.
-fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
+fn graph_cell(row: GraphRow, is_head: bool, theme: &ThemeColor) -> AnyElement {
     let theme = *theme;
 
     canvas(
@@ -243,7 +255,6 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
             let strokes = row_geometry
                 .incoming
                 .iter()
-                .chain(row_geometry.crossings.iter())
                 .chain(row_geometry.outgoing.iter());
 
             for segment in strokes {
@@ -257,43 +268,11 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
                 );
                 let color = lane_color(segment.color, &theme);
 
-                let bend = segment
-                    .bend
-                    .map(|bend| point(bounds.origin.x + bend.x, bounds.origin.y + bend.y));
-                let legs = match bend {
-                    Some(bend) => vec![(top, bend), (bend, bottom)],
-                    None => vec![(top, bottom)],
-                };
-
-                if let Some(bend) = bend {
-                    let radius = geometry::DIAGONAL_LINE_WIDTH * 0.5;
-                    window.paint_quad(
-                        fill(
-                            Bounds {
-                                origin: point(bend.x - radius, bend.y - radius),
-                                size: size(radius * 2., radius * 2.),
-                            },
-                            color,
-                        )
-                        .corner_radii(radius),
-                    );
-                }
-
-                for (start, end) in legs {
-                    if start == end {
-                        continue;
-                    }
-                    let width = if start.x == end.x {
-                        geometry::LINE_WIDTH
-                    } else {
-                        geometry::DIAGONAL_LINE_WIDTH
-                    };
-                    let mut builder = PathBuilder::stroke(width);
-                    builder.move_to(start);
-                    builder.line_to(end);
-                    if let Ok(path) = builder.build() {
-                        window.paint_path(path, color);
-                    }
+                let mut builder = PathBuilder::stroke(geometry::LINE_WIDTH);
+                builder.move_to(top);
+                builder.line_to(bottom);
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, color);
                 }
             }
 
@@ -301,16 +280,29 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
                 bounds.origin.x + row_geometry.node_center.x,
                 bounds.origin.y + row_geometry.node_center.y,
             );
-            let node_bounds = Bounds {
-                origin: point(
-                    node_center.x - geometry::NODE_RADIUS,
-                    node_center.y - geometry::NODE_RADIUS,
-                ),
-                size: size(geometry::NODE_RADIUS * 2., geometry::NODE_RADIUS * 2.),
+
+            let disc = |radius: Pixels| Bounds {
+                origin: point(node_center.x - radius, node_center.y - radius),
+                size: size(radius * 2., radius * 2.),
             };
+
             window.paint_quad(
-                fill(node_bounds, lane_color(row_geometry.node_color, &theme))
-                    .corner_radii(geometry::NODE_RADIUS),
+                fill(
+                    disc(geometry::NODE_RADIUS),
+                    lane_color(row_geometry.node_color, &theme),
+                )
+                .corner_radii(geometry::NODE_RADIUS),
+            );
+            window.paint_quad(
+                fill(
+                    disc(geometry::NODE_INNER_RADIUS),
+                    if is_head {
+                        gpui::rgb(HEAD_NODE_FILL).into()
+                    } else {
+                        theme.background
+                    },
+                )
+                .corner_radii(geometry::NODE_INNER_RADIUS),
             );
         },
     )
@@ -395,7 +387,6 @@ mod tests {
             color: LaneColor(color),
             segments,
             incoming: Vec::new(),
-            next_lane: None,
         }
     }
 
