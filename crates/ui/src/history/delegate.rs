@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use domain::{CommitSummary, ObjectId, Reference};
+use domain::{BranchName, CommitSummary, ObjectId, Reference};
 use gpui::{
     AnyElement, App, Bounds, Context, Div, InteractiveElement as _, IntoElement,
     ParentElement as _, PathBuilder, Pixels, SharedString, Stateful, Styled as _, Window, canvas,
@@ -42,6 +42,7 @@ pub(crate) struct HistoryTableDelegate {
     filter: HistoryFilter,
     visible_indices: Vec<usize>,
     graph_width: Pixels,
+    head_branch: Option<BranchName>,
 }
 
 impl HistoryTableDelegate {
@@ -51,7 +52,12 @@ impl HistoryTableDelegate {
             filter: HistoryFilter::default(),
             visible_indices: Vec::new(),
             graph_width: geometry::LANE_SPACING,
+            head_branch: None,
         }
+    }
+
+    pub(crate) fn set_head_branch(&mut self, head_branch: Option<BranchName>) {
+        self.head_branch = head_branch;
     }
 
     pub(crate) fn set_history(&mut self, history: LoadState<Arc<History>>) {
@@ -194,7 +200,12 @@ impl TableDelegate for HistoryTableDelegate {
                 Some(row) => graph_cell(row.clone(), &theme),
                 None => div().into_any_element(),
             },
-            SUBJECT_COLUMN => subject_cell(commit, history.references_at(commit.id), &theme),
+            SUBJECT_COLUMN => subject_cell(
+                commit,
+                history.references_at(commit.id),
+                self.head_branch.as_ref(),
+                &theme,
+            ),
             AUTHOR_COLUMN => author_cell(commit),
             DATE_COLUMN => date_cell(commit),
             _ => div().into_any_element(),
@@ -310,6 +321,7 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
 fn subject_cell(
     commit: &CommitSummary,
     references: &[Reference],
+    head_branch: Option<&BranchName>,
     theme: &ThemeColor,
 ) -> AnyElement {
     h_flex()
@@ -318,11 +330,9 @@ fn subject_cell(
         .gap_1()
         .px_2()
         .overflow_hidden()
-        .children(
-            references
-                .iter()
-                .map(|reference| badges::render_badge(reference, theme).into_any_element()),
-        )
+        .children(references.iter().map(|reference| {
+            badges::render_badge(reference, head_branch, theme).into_any_element()
+        }))
         .child(div().truncate().child(commit.summary.clone()))
         .into_any_element()
 }

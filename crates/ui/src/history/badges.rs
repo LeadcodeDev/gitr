@@ -3,22 +3,34 @@
 //! A badge is coloured by [`BadgeKind`], not by the reference's identity, so every local
 //! branch reads the same way and a remote branch or tag never gets mistaken for one.
 
-use gpui::{Hsla, IntoElement, ParentElement as _};
+use gpui::{Hsla, IntoElement, ParentElement as _, px, rgb};
 use gpui_component::{Sizable as _, ThemeColor, tag::Tag};
 
-use domain::Reference;
+use domain::{BranchName, Reference};
 
-/// Which of the three badge colours a reference gets.
+/// No theme in the tree carries an orange, so the checked-out branch brings its own.
+/// Between `theme.yellow` and this sits the only pair the distinguishability tests come
+/// close to failing, which is why the hue is pushed this far from red.
+const CURRENT_BRANCH: u32 = 0xe8622a;
+
+const BADGE_RADIUS: f32 = 4.;
+
+/// Which of the four badge colours a reference gets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BadgeKind {
+    CurrentBranch,
     LocalBranch,
     RemoteBranch,
     Tag,
 }
 
 /// Classifies `reference` for badge colouring.
-pub fn classify(reference: &Reference) -> BadgeKind {
+///
+/// `head_branch` is the branch HEAD points at, or `None` on a detached HEAD — where no
+/// local branch is current and every one of them reads as an ordinary local branch.
+pub fn classify(reference: &Reference, head_branch: Option<&BranchName>) -> BadgeKind {
     match reference {
+        Reference::LocalBranch(name) if head_branch == Some(name) => BadgeKind::CurrentBranch,
         Reference::LocalBranch(_) => BadgeKind::LocalBranch,
         Reference::RemoteBranch { .. } => BadgeKind::RemoteBranch,
         Reference::Tag(_) => BadgeKind::Tag,
@@ -28,18 +40,23 @@ pub fn classify(reference: &Reference) -> BadgeKind {
 /// The theme colour a badge of `kind` renders with.
 pub fn badge_color(kind: BadgeKind, theme: &ThemeColor) -> Hsla {
     match kind {
-        BadgeKind::LocalBranch => theme.blue,
-        BadgeKind::RemoteBranch => theme.green,
+        BadgeKind::CurrentBranch => rgb(CURRENT_BRANCH).into(),
+        BadgeKind::LocalBranch => theme.green,
+        BadgeKind::RemoteBranch => theme.blue,
         BadgeKind::Tag => theme.yellow,
     }
 }
 
 /// One reference badge, as it sits inline before a subject.
-pub fn render_badge(reference: &Reference, theme: &ThemeColor) -> impl IntoElement {
-    let color = badge_color(classify(reference), theme);
+pub fn render_badge(
+    reference: &Reference,
+    head_branch: Option<&BranchName>,
+    theme: &ThemeColor,
+) -> impl IntoElement {
+    let color = badge_color(classify(reference, head_branch), theme);
 
     Tag::custom(color.opacity(0.16), color, color.opacity(0.4))
-        .rounded_full()
+        .rounded(px(BADGE_RADIUS))
         .xsmall()
         .child(reference.short_name())
 }
@@ -66,9 +83,11 @@ mod tests {
 
     #[test]
     fn classifies_each_reference_kind() {
-        assert_eq!(classify(&local()), BadgeKind::LocalBranch);
-        assert_eq!(classify(&remote()), BadgeKind::RemoteBranch);
-        assert_eq!(classify(&tag()), BadgeKind::Tag);
+        let head = BranchName::new("main").unwrap();
+        assert_eq!(classify(&local(), None), BadgeKind::LocalBranch);
+        assert_eq!(classify(&local(), Some(&head)), BadgeKind::CurrentBranch);
+        assert_eq!(classify(&remote(), Some(&head)), BadgeKind::RemoteBranch);
+        assert_eq!(classify(&tag(), Some(&head)), BadgeKind::Tag);
     }
 
     #[test]
@@ -102,6 +121,7 @@ mod tests {
 
     fn assert_all_distinct(theme: &ThemeColor) {
         let colors = [
+            badge_color(BadgeKind::CurrentBranch, theme),
             badge_color(BadgeKind::LocalBranch, theme),
             badge_color(BadgeKind::RemoteBranch, theme),
             badge_color(BadgeKind::Tag, theme),

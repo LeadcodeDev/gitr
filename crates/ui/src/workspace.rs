@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use domain::{Aspect, HeadState, HistoryScope, Reference, RepositoryChange};
+use domain::{Aspect, BranchName, HeadState, HistoryScope, Reference, RepositoryChange};
 use gpui::{
     Action, Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, Axis, Context,
     Entity, Hsla, InteractiveElement as _, IntoElement, Menu, MenuItem, OsAction,
@@ -573,8 +573,11 @@ impl Workspace {
         match event {
             RepositoryEvent::HistoryChanged => {
                 let history = repository.read(cx).history().clone();
-                self.history_panel
-                    .update(cx, |panel, cx| panel.set_history(history, cx));
+                let head_branch = head_branch(repository.read(cx).head());
+                self.history_panel.update(cx, |panel, cx| {
+                    panel.set_history(history, cx);
+                    panel.set_head_branch(head_branch, cx);
+                });
                 cx.notify();
             }
             RepositoryEvent::SelectionChanged => {
@@ -1196,8 +1199,16 @@ fn sync_panels_from_repository(
 ) {
     let history = repository.read(cx).history().clone();
     let detail = repository.read(cx).detail().clone();
-    history_panel.update(cx, |panel, cx| panel.set_history(history, cx));
+    let head = head_branch(repository.read(cx).head());
+    history_panel.update(cx, |panel, cx| {
+        panel.set_history(history, cx);
+        panel.set_head_branch(head, cx);
+    });
     detail_panel.update(cx, |panel, cx| panel.set_detail(detail, cx));
+}
+
+fn head_branch(head: &LoadState<HeadState>) -> Option<BranchName> {
+    head.ready()?.branch().cloned()
 }
 
 /// Reads the persisted theme preference, logging and defaulting on a genuine failure to
