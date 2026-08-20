@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use domain::{Aspect, BranchName, HeadState, HistoryScope, Reference, RepositoryChange};
+use domain::{Aspect, BranchName, HeadState, HistoryScope, ObjectId, Reference, RepositoryChange};
 use gpui::{
     Action, Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, Axis, Context,
     Entity, Hsla, InteractiveElement as _, IntoElement, Menu, MenuItem, OsAction,
@@ -573,10 +573,10 @@ impl Workspace {
         match event {
             RepositoryEvent::HistoryChanged => {
                 let history = repository.read(cx).history().clone();
-                let head_branch = head_branch(repository.read(cx).head());
+                let head = repository.read(cx).head().clone();
                 self.history_panel.update(cx, |panel, cx| {
                     panel.set_history(history, cx);
-                    panel.set_head_branch(head_branch, cx);
+                    panel.set_head(head_branch(&head), head_commit(&head), cx);
                 });
                 cx.notify();
             }
@@ -1199,16 +1199,24 @@ fn sync_panels_from_repository(
 ) {
     let history = repository.read(cx).history().clone();
     let detail = repository.read(cx).detail().clone();
-    let head = head_branch(repository.read(cx).head());
+    let head = repository.read(cx).head().clone();
     history_panel.update(cx, |panel, cx| {
         panel.set_history(history, cx);
-        panel.set_head_branch(head, cx);
+        panel.set_head(head_branch(&head), head_commit(&head), cx);
     });
     detail_panel.update(cx, |panel, cx| panel.set_detail(detail, cx));
 }
 
 fn head_branch(head: &LoadState<HeadState>) -> Option<BranchName> {
     head.ready()?.branch().cloned()
+}
+
+/// The commit HEAD resolves to, which is what marks a node as the one you are sitting on.
+///
+/// Not derivable from [`head_branch`]: a detached HEAD has a target and no branch, and that
+/// is precisely the case where the node is the only thing left saying where you are.
+fn head_commit(head: &LoadState<HeadState>) -> Option<ObjectId> {
+    head.ready()?.target()
 }
 
 /// Reads the persisted theme preference, logging and defaulting on a genuine failure to

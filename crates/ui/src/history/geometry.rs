@@ -10,8 +10,18 @@ use graph::{GraphRow, Lane, LaneColor};
 /// Horizontal distance between two adjacent lane centres.
 pub const LANE_SPACING: Pixels = px(12.);
 
-/// Radius of a commit's own node.
-pub const NODE_RADIUS: Pixels = px(3.);
+/// Outer radius of a commit's own node, which is the radius of its ring.
+///
+/// Half [`LANE_SPACING`], so a node spans its whole column and two nodes in adjacent
+/// columns just touch. GitX draws a 10px circle in a 10px column; this keeps that ratio.
+pub const NODE_RADIUS: Pixels = px(6.);
+
+/// Radius of the disc filling the node, inside the ring.
+///
+/// Four fifths of [`NODE_RADIUS`], GitX's ratio: it draws a 10px circle and a 8px one over
+/// it. The ring is what remains, and it is thin on purpose — thick enough to close the
+/// shape, not thick enough to read as the node itself.
+pub const NODE_INNER_RADIUS: Pixels = px(4.8);
 
 /// Stroke width of a vertical graph line.
 pub const LINE_WIDTH: Pixels = px(1.5);
@@ -55,10 +65,13 @@ pub struct SegmentGeometry {
 /// there from the top edge; lines below leave it for the bottom edge. Every one of them
 /// ends or starts at that centre, which is what makes a line meet a node rather than pass
 /// beside it.
+///
+/// The node carries no colour. GitX paints every node the same ring and the same fill,
+/// whatever track it belongs to, and reserves the palette for lines — [`GraphRow::color`]
+/// is therefore read for the segments and not for the node.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RowGeometry {
     pub node_center: Point<Pixels>,
-    pub node_color: LaneColor,
     pub incoming: Vec<SegmentGeometry>,
     pub outgoing: Vec<SegmentGeometry>,
 }
@@ -91,7 +104,6 @@ pub fn row_geometry(row: &GraphRow, row_height: Pixels, lane_spacing: Pixels) ->
 
     RowGeometry {
         node_center,
-        node_color: row.color,
         incoming,
         outgoing,
     }
@@ -211,6 +223,20 @@ mod gutter_fit {
                 assert!(center - NODE_RADIUS >= Pixels::ZERO);
             }
         }
+    }
+
+    #[test]
+    fn a_node_spans_its_whole_column_and_keeps_a_ring_inside_it() {
+        assert_eq!(
+            NODE_RADIUS * 2.,
+            LANE_SPACING,
+            "GitX draws a 10px node in a 10px column; changing the spacing alone would \
+             silently shrink the node against its neighbours"
+        );
+        assert!(
+            NODE_INNER_RADIUS < NODE_RADIUS,
+            "the fill must leave a ring, or the node is a plain disc again"
+        );
     }
 
     #[test]

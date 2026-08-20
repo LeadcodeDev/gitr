@@ -106,9 +106,14 @@ impl HistoryPanel {
         cx.notify();
     }
 
-    pub fn set_head_branch(&mut self, head_branch: Option<BranchName>, cx: &mut Context<Self>) {
+    pub fn set_head(
+        &mut self,
+        branch: Option<BranchName>,
+        commit: Option<ObjectId>,
+        cx: &mut Context<Self>,
+    ) {
         self.table.update(cx, |table, cx| {
-            table.delegate_mut().set_head_branch(head_branch);
+            table.delegate_mut().set_head(branch, commit);
             table.refresh(cx);
         });
         cx.notify();

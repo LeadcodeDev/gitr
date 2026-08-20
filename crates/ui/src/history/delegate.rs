@@ -37,12 +37,20 @@ const SUBJECT_COLUMN_WIDTH: Pixels = px(420.);
 const AUTHOR_COLUMN_WIDTH: Pixels = px(150.);
 const DATE_COLUMN_WIDTH: Pixels = px(84.);
 
+/// The fill GitX gives the checked-out commit's node, taken from `PBGitRevisionCell`.
+///
+/// Deliberately not [`badges::CURRENT_BRANCH`], which is a stronger orange: that one is a
+/// plate behind white text and has to carry it, while this one sits inside a ring and has
+/// to leave it legible. Two jobs, two values, both meaning "this is where you are".
+const HEAD_NODE_FILL: u32 = 0xfca64f;
+
 pub(crate) struct HistoryTableDelegate {
     history: LoadState<Arc<History>>,
     filter: HistoryFilter,
     visible_indices: Vec<usize>,
     graph_width: Pixels,
     head_branch: Option<BranchName>,
+    head_commit: Option<ObjectId>,
 }
 
 impl HistoryTableDelegate {
@@ -53,11 +61,13 @@ impl HistoryTableDelegate {
             visible_indices: Vec::new(),
             graph_width: geometry::LANE_SPACING,
             head_branch: None,
+            head_commit: None,
         }
     }
 
-    pub(crate) fn set_head_branch(&mut self, head_branch: Option<BranchName>) {
-        self.head_branch = head_branch;
+    pub(crate) fn set_head(&mut self, branch: Option<BranchName>, commit: Option<ObjectId>) {
+        self.head_branch = branch;
+        self.head_commit = commit;
     }
 
     pub(crate) fn set_history(&mut self, history: LoadState<Arc<History>>) {
@@ -197,7 +207,7 @@ impl TableDelegate for HistoryTableDelegate {
         match col_ix {
             SHA_COLUMN => sha_cell(commit, &theme),
             GRAPH_COLUMN => match history.layout.rows.get(commit_ix) {
-                Some(row) => graph_cell(row.clone(), &theme),
+                Some(row) => graph_cell(row.clone(), self.head_commit == Some(commit.id), &theme),
                 None => div().into_any_element(),
             },
             SUBJECT_COLUMN => subject_cell(
@@ -231,7 +241,7 @@ fn sha_cell(commit: &CommitSummary, theme: &ThemeColor) -> AnyElement {
 /// total width instead — the two are equal only for a single-lane history, so every
 /// branchier repository silently placed lane 1 beyond the cell and clipped it away, node
 /// and line together. There is exactly one correct value, so the parameter is gone.
-fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
+fn graph_cell(row: GraphRow, is_head: bool, theme: &ThemeColor) -> AnyElement {
     let theme = *theme;
 
     canvas(
@@ -272,16 +282,26 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
                 bounds.origin.x + row_geometry.node_center.x,
                 bounds.origin.y + row_geometry.node_center.y,
             );
-            let node_bounds = Bounds {
-                origin: point(
-                    node_center.x - geometry::NODE_RADIUS,
-                    node_center.y - geometry::NODE_RADIUS,
-                ),
-                size: size(geometry::NODE_RADIUS * 2., geometry::NODE_RADIUS * 2.),
+
+            let disc = |radius: Pixels| Bounds {
+                origin: point(node_center.x - radius, node_center.y - radius),
+                size: size(radius * 2., radius * 2.),
             };
+
             window.paint_quad(
-                fill(node_bounds, lane_color(row_geometry.node_color, &theme))
+                fill(disc(geometry::NODE_RADIUS), theme.foreground)
                     .corner_radii(geometry::NODE_RADIUS),
+            );
+            window.paint_quad(
+                fill(
+                    disc(geometry::NODE_INNER_RADIUS),
+                    if is_head {
+                        gpui::rgb(HEAD_NODE_FILL).into()
+                    } else {
+                        theme.background
+                    },
+                )
+                .corner_radii(geometry::NODE_INNER_RADIUS),
             );
         },
     )
