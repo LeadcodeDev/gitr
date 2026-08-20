@@ -165,6 +165,14 @@ upper half, `segments` for the lower — and correct columns are not enough on t
 segment spanning the whole band between two rows draws the right topology with every
 divergence starting a half-row below the node it comes from.
 
+**Two concentric quads stay concentric only on whole-pixel arithmetic.** A commit's node is
+a disc in the track's colour with a smaller one over it, and each quad is snapped to the
+device grid on its own. A 1.2px ring put the two origins on different sub-pixel offsets, so
+they rounded in opposite directions and the fill sat half a pixel off — on screen, a ring
+2px thick on one side and 1px on the other, which reads as a drawing bug rather than as
+rounding. Both diameters must be whole numbers and the ring between them must be a whole
+number too. `crates/ui/src/history/geometry.rs` asserts all three.
+
 **Network and mutating Git operations go through subprocess `git`, never a library.**
 libssh2 does not read `~/.ssh/config`, so `Host` aliases and `ProxyCommand` silently break.
 The subprocess must inherit a `PATH` resolved from the user's login shell — a macOS GUI

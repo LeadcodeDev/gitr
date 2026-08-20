@@ -27,11 +27,16 @@ pub const NODE_INNER_RADIUS: Pixels = px(NODE_RADIUS_PX - NODE_RING_WIDTH_PX);
 /// be derived from another once wrapped.
 ///
 /// The ring is not itself a constant here because nothing paints it — it is what remains
-/// between the two discs. GitX's is 1px on a 10px node; this one is a touch wider because
-/// the node is smaller, and the ring is the only thing distinguishing a node from the line
-/// running through it.
+/// between the two discs, and it is GitX's own 1px.
+///
+/// **Both constraints in [`node_radii_snap_to_the_same_pixel_grid`] are load-bearing, not
+/// tidiness.** The two discs are separate quads and each is snapped to the device grid on
+/// its own. A ring of 1.2px put their origins on different sub-pixel offsets, so they
+/// rounded in different directions and the fill landed half a pixel off centre — visible as
+/// a ring 2px thick on one side and 1px on the other. A whole-pixel ring and whole-pixel
+/// diameters make both discs round identically, which is the only way they stay concentric.
 const NODE_RADIUS_PX: f32 = 4.5;
-const NODE_RING_WIDTH_PX: f32 = 1.2;
+const NODE_RING_WIDTH_PX: f32 = 1.0;
 
 /// Stroke width of a vertical graph line.
 pub const LINE_WIDTH: Pixels = px(1.5);
@@ -236,6 +241,33 @@ mod gutter_fit {
                 assert!(center - NODE_RADIUS >= Pixels::ZERO);
             }
         }
+    }
+
+    /// The two discs are painted as separate quads, each snapped to the device pixel grid
+    /// on its own. They stay concentric only if that snapping moves them identically, which
+    /// needs two things: whole-pixel diameters, so rounding the size is a no-op, and a
+    /// whole-pixel ring, so both origins sit at the same sub-pixel offset from the centre.
+    ///
+    /// A 1.2px ring broke the second one and put the fill half a pixel off, which reads as a
+    /// node drawn wrong rather than as a rounding artefact.
+    #[test]
+    fn node_radii_snap_to_the_same_pixel_grid() {
+        assert_eq!(
+            (NODE_RADIUS_PX * 2.).fract(),
+            0.,
+            "the outer diameter must be a whole number of pixels"
+        );
+        assert_eq!(
+            ((NODE_RADIUS_PX - NODE_RING_WIDTH_PX) * 2.).fract(),
+            0.,
+            "and so must the inner one"
+        );
+        assert_eq!(
+            NODE_RING_WIDTH_PX.fract(),
+            0.,
+            "a fractional ring puts the two origins on different sub-pixel offsets, and they \
+             then round apart"
+        );
     }
 
     #[test]
