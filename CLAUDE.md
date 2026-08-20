@@ -110,7 +110,7 @@ not a git command`.
 
 The same limitation reaches *installing* gitr, because cargo fetches through its own
 bundled libgit2 too. It does not bite today — this repository is public, so
-`cargo install --git https://github.com/LeadcodeDev/gitr` fetches anonymously with no
+`cargo install --git https://github.com/ferrislabs/gitr` fetches anonymously with no
 credentials and no flags, verified with `GIT_CONFIG_GLOBAL=/dev/null`. It would return the
 moment the repository went private again: HTTPS then fails for want of a credential
 helper, SSH fails with `no authentication methods succeeded` because libgit2 reads neither

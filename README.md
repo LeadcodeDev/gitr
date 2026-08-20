@@ -18,10 +18,10 @@ Milestone 1 — read and visualise. Not yet usable.
 ## Installing
 
 ```sh
-cargo install --git https://github.com/LeadcodeDev/gitr
+cargo install --git https://github.com/ferrislabs/gitr
 ```
 
-A prebuilt Apple Silicon binary is attached to every [release](https://github.com/LeadcodeDev/gitr/releases).
+A prebuilt Apple Silicon binary is attached to every [release](https://github.com/ferrislabs/gitr/releases).
 It is unsigned, so macOS quarantines it on download and it needs
 `xattr -d com.apple.quarantine gitr` before the first run — building it yourself avoids
 that, since nothing is downloaded.
@@ -74,6 +74,15 @@ not libraries, so it takes the prefixed form.
 `gitr-domain` and `gitr-graph` do not depend on gpui, so `cargo test -p gitr-domain -p
 gitr-graph` runs in seconds rather than minutes.
 
+## Contributing
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) covers the build, the test loop, and the
+architectural rule a change has to respect.
+
 ## License
 
-MIT
+[Apache 2.0](LICENSE).
+
+Releases up to and including the last MIT-licensed commit stay available under
+MIT — a licence already granted cannot be withdrawn. Apache 2.0 applies from
+this commit forward.
