@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use domain::{Commit, CommitSummary, HistoryScope, ObjectId, Patch, RefEntry, Reference};
+use domain::{
+    BranchName, Commit, CommitSummary, HistoryScope, ObjectId, Patch, RefEntry, Reference,
+};
 use graph::GraphLayout;
 
 /// Where an asynchronous read has got to.
@@ -139,12 +141,27 @@ impl ReferenceIndex {
         }
         index
     }
+
+    pub fn fallback_branch(&self) -> Option<BranchName> {
+        FALLBACK_BRANCHES.iter().find_map(|candidate| {
+            self.local_branches
+                .iter()
+                .filter_map(|entry| match &entry.reference {
+                    Reference::LocalBranch(branch) => Some(branch),
+                    _ => None,
+                })
+                .find(|branch| branch.as_str() == *candidate)
+                .cloned()
+        })
+    }
 }
+
+const FALLBACK_BRANCHES: [&str; 2] = ["main", "master"];
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::{BranchName, Parents, Signature, TagName, Timestamp};
+    use domain::{Parents, Signature, TagName, Timestamp};
 
     fn id(nibble: char) -> ObjectId {
         nibble.to_string().repeat(40).parse().unwrap()
@@ -204,6 +221,46 @@ mod tests {
             ..Default::default()
         };
         assert!(!filter.matches(&commit("anything", "anyone")));
+    }
+
+    fn index_of(branches: &[&str]) -> ReferenceIndex {
+        ReferenceIndex::from_entries(
+            branches
+                .iter()
+                .map(|name| RefEntry {
+                    reference: Reference::LocalBranch(BranchName::new(*name).unwrap()),
+                    target: id('a'),
+                    upstream: None,
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn the_fallback_branch_is_main_when_it_exists() {
+        assert_eq!(
+            index_of(&["feature", "master", "main"]).fallback_branch(),
+            Some(BranchName::new("main").unwrap()),
+            "main wins over master wherever both exist, and whatever order they arrive in"
+        );
+    }
+
+    #[test]
+    fn the_fallback_branch_falls_back_to_master() {
+        assert_eq!(
+            index_of(&["feature", "master"]).fallback_branch(),
+            Some(BranchName::new("master").unwrap())
+        );
+    }
+
+    #[test]
+    fn a_repository_with_neither_has_no_fallback_branch() {
+        assert_eq!(
+            index_of(&["trunk", "develop"]).fallback_branch(),
+            None,
+            "no fallback means deleting the checked-out branch is not offered at all, rather \
+             than offered and failing with nowhere to go"
+        );
     }
 
     #[test]

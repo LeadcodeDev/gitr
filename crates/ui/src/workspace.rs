@@ -563,6 +563,70 @@ impl Workspace {
             .update(cx, |repository, cx| repository.set_filter(filter, cx));
     }
 
+    pub(crate) fn delete_local_branch(
+        &mut self,
+        branch: BranchName,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let repository_path = self.repository.read(cx).path().to_path_buf();
+        let switch_to = self
+            .head_branch_name(cx)
+            .filter(|head| head == &branch)
+            .and_then(|_| self.fallback_branch(cx));
+
+        cx.spawn_in(window, async move |workspace, window| {
+            let deleted = branch.clone();
+            let result = window
+                .background_executor()
+                .spawn(async move {
+                    GitRunner::new().delete_local_branch(
+                        &repository_path,
+                        &branch,
+                        switch_to.as_ref(),
+                    )
+                })
+                .await;
+
+            let _ = workspace.update_in(window, move |workspace, window, cx| {
+                match result {
+                    Ok(()) => {
+                        window.push_notification(
+                            (NotificationType::Info, format!("Deleted {deleted}")),
+                            cx,
+                        );
+                        workspace.repository.update(cx, |repository, cx| {
+                            repository.reload(RepositoryChange::only(Aspect::References), cx);
+                        });
+                    }
+                    Err(error) => {
+                        window.push_notification(
+                            (
+                                NotificationType::Error,
+                                format!("Could not delete {deleted}: {error}"),
+                            ),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn head_branch_name(&self, cx: &App) -> Option<BranchName> {
+        self.repository.read(cx).head().ready()?.branch().cloned()
+    }
+
+    fn fallback_branch(&self, cx: &App) -> Option<BranchName> {
+        self.repository
+            .read(cx)
+            .references()
+            .ready()?
+            .fallback_branch()
+    }
+
     fn on_repository_event(
         &mut self,
         repository: &Entity<RepositoryState>,

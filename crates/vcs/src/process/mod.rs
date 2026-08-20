@@ -6,6 +6,7 @@
 //! [`GitRunner::fetch`]. [`GitRunner::clone_bare_with_progress`] is the same clone with
 //! [`CloneProgress`] updates streamed out as it runs.
 
+mod branch;
 mod clone_progress;
 mod login_path;
 mod patch_parser;
@@ -13,6 +14,7 @@ mod patch_reader;
 mod remote;
 mod runner;
 
+pub use branch::BranchError;
 pub use clone_progress::{ClonePhase, CloneProgress};
 pub use login_path::{LoginPathResolution, LoginPathSource, login_path};
 pub use patch_reader::SubprocessPatchReader;
