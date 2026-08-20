@@ -18,8 +18,14 @@ Milestone 1 — read and visualise. Not yet usable.
 ## Installing
 
 ```sh
-cargo install --git https://github.com/ferrislabs/gitr
+cargo install --locked --git https://github.com/ferrislabs/gitr
 ```
+
+`--locked` is not optional. gitr builds against `gpui` from zed's default branch, which
+moves; `Cargo.lock` is what pins the revision it actually compiles with. `cargo install`
+ignores a lock file unless told not to, resolves those git dependencies afresh, and fails
+on whatever changed upstream since — most recently a `register_panel` signature that grew
+two parameters.
 
 A prebuilt Apple Silicon binary is attached to every [release](https://github.com/ferrislabs/gitr/releases).
 It is unsigned, so macOS quarantines it on download and it needs

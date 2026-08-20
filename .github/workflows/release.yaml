@@ -91,7 +91,7 @@ jobs:
           Building it yourself avoids that entirely, since nothing is downloaded:
 
           ```sh
-          cargo install --git https://github.com/ferrislabs/gitr
+          cargo install --locked --git https://github.com/ferrislabs/gitr
           ```
 
           Run `gitr` inside a checkout to open it. The command returns the prompt straight
