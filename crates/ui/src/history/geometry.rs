@@ -98,7 +98,7 @@ pub fn row_geometry(row: &GraphRow, row_height: Pixels, lane_spacing: Pixels) ->
                 bottom: point(from_x, row_height),
                 color: segment.color,
             }
-        } else if is_outgoing && row.lands_on_next_node(segment) {
+        } else if row.lands_on_next_node(segment) {
             SegmentGeometry {
                 top,
                 bend: Some(point(from_x, row_height * 0.5 + NODE_RADIUS)),
