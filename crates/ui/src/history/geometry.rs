@@ -36,18 +36,23 @@ pub const NODE_INNER_RADIUS: Pixels = px(NODE_RADIUS_PX - NODE_RING_WIDTH_PX);
 /// a ring 2px thick on one side and 1px on the other. A whole-pixel ring and whole-pixel
 /// diameters make both discs round identically, which is the only way they stay concentric.
 const NODE_RADIUS_PX: f32 = 4.5;
-const NODE_RING_WIDTH_PX: f32 = 1.0;
+const NODE_RING_WIDTH_PX: f32 = 2.0;
 
 /// Stroke width of a vertical graph line.
-pub const LINE_WIDTH: Pixels = px(1.5);
+///
+/// Matches the node's ring, which the pixel grid pins to a whole number: at 1.5 the line
+/// covered two columns at four fifths each, so it carried less ink than a 2px ring beside
+/// it and read lighter than the node it ran into. Two is also GitX's own `setLineWidth:2`.
+pub const LINE_WIDTH: Pixels = px(NODE_RING_WIDTH_PX);
 
 /// Stroke width of a sloped graph line.
 ///
 /// Wider than [`LINE_WIDTH`] on purpose. A vertical stroke lands square on the pixel grid
 /// and paints two columns at full strength; the same width on a diagonal spreads across
 /// three with two of them faint, so it carries the same ink and reads lighter. Matching
-/// the *perceived* weight is what the eye compares, not the declared width.
-pub const DIAGONAL_LINE_WIDTH: Pixels = px(2.1);
+/// the *perceived* weight is what the eye compares, not the declared width. The factor is
+/// the one that read right at 1.5, carried over rather than re-derived.
+pub const DIAGONAL_LINE_WIDTH: Pixels = px(NODE_RING_WIDTH_PX * 1.4);
 
 /// The x coordinate of `lane`'s centre, relative to the gutter's left edge.
 pub fn lane_center_x(lane: Lane, lane_spacing: Pixels) -> Pixels {
