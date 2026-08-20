@@ -87,6 +87,7 @@ fn main() -> ExitCode {
             gpui_component::init(cx);
             ui::init(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
+            set_dock_icon();
 
             let projects = projects.clone();
             cx.spawn(async move |cx| {
@@ -103,6 +104,38 @@ fn main() -> ExitCode {
         });
 
     ExitCode::SUCCESS
+}
+
+/// Sets the icon macOS shows in the dock and the application switcher.
+///
+/// A binary run from a terminal has no `.app` bundle around it, so there is no
+/// `Info.plist` for macOS to read `CFBundleIconFile` from and the dock falls back to a
+/// blank executable icon. `NSApplication`'s `applicationIconImage` is the only way in for
+/// a bundle-less process, and gpui exposes no equivalent — its platform trait stops at
+/// `set_dock_menu`. That is why this reaches for AppKit directly rather than going
+/// through gpui.
+///
+/// Must run on the main thread and after gpui has created the `NSApplication`, which is
+/// exactly what the `run` closure guarantees. `MainThreadMarker::new` returning `None`
+/// therefore means the call site moved, not that the machine is unusual.
+///
+/// A failure to decode the image is swallowed: a missing icon is cosmetic, and refusing
+/// to start a Git client over it would be absurd.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::AnyThread as _;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::{MainThreadMarker, NSData};
+
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+    let data = NSData::with_bytes(include_bytes!("../assets/icon.png"));
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        return;
+    };
+
+    unsafe { NSApplication::sharedApplication(main_thread).setApplicationIconImage(Some(&image)) };
 }
 
 /// Set on the process that opens the window, so it runs the event loop instead of
