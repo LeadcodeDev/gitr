@@ -76,4 +76,8 @@ gitr-graph` runs in seconds rather than minutes.
 
 ## License
 
-MIT
+[Apache 2.0](LICENSE).
+
+Releases up to and including the last MIT-licensed commit stay available under
+MIT — a licence already granted cannot be withdrawn. Apache 2.0 applies from
+this commit forward.
