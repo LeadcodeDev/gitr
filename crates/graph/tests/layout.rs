@@ -315,3 +315,37 @@ fn a_root_commit_emits_no_segment_of_its_own() {
     );
     assert!(!layout.rows[0].has_incoming());
 }
+
+/// GitX defers convergence: a commit's first parent takes over its lane without checking
+/// whether another column already expects that parent, so two columns hold the same object
+/// until the row that places it. Converging eagerly instead closes a column a row early and
+/// slides everything to its right, which is what made ten of this repository's own commits
+/// sit one column left of where GitX draws them.
+#[test]
+fn a_branch_keeps_its_column_until_the_shared_parent_is_actually_reached() {
+    let commits = [
+        commit("main2", Parents::Linear(oid("main1"))),
+        commit("side", Parents::Linear(oid("main1"))),
+        commit("main1", Parents::Root),
+    ];
+
+    let result = layout(&commits);
+
+    assert_eq!(
+        result.rows[1].lane,
+        Lane(1),
+        "the branch tip opens a column"
+    );
+    assert_eq!(
+        result.rows[1].segments,
+        vec![seg(0, 0, 0), seg(1, 0, 1)],
+        "both columns still hold main1 through this band, and meet only where it is placed"
+    );
+    assert_eq!(result.rows[2].lane, Lane(0));
+    assert_eq!(
+        result.rows[2].incoming.len(),
+        2,
+        "the shared parent receives a line from each column that was waiting for it"
+    );
+    assert_eq!(result.width, 2);
+}
