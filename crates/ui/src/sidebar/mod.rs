@@ -12,11 +12,12 @@ pub mod branch_tree;
 pub(crate) mod selector;
 pub mod tree;
 
-use domain::{BranchName, HeadState, Reference};
+use domain::{HeadState, Reference};
 use gpui::{Context, WeakEntity};
-use gpui_component::{IconName, menu::PopupMenuItem, sidebar::Sidebar};
+use gpui_component::{IconName, sidebar::Sidebar};
 
 use crate::{
+    branch_actions::{Deletion, delete_menu_item},
     project::ProjectList,
     repository::{LoadState, ReferenceIndex},
     workspace::Workspace,
@@ -60,43 +61,6 @@ pub(crate) fn render(
 
 fn working_item() -> SidebarTreeItem {
     SidebarTreeItem::new("Working").icon(IconName::FolderOpen)
-}
-
-#[derive(Clone)]
-struct Deletion {
-    head: Option<BranchName>,
-    fallback: Option<BranchName>,
-}
-
-impl Deletion {
-    fn switch_to(&self, branch: &BranchName) -> Option<Option<BranchName>> {
-        if self.head.as_ref() != Some(branch) {
-            return Some(None);
-        }
-        match &self.fallback {
-            Some(fallback) if fallback != branch => Some(Some(fallback.clone())),
-            _ => None,
-        }
-    }
-}
-
-fn delete_menu_item(
-    branch: &BranchName,
-    switch_to: Option<&BranchName>,
-    workspace: &WeakEntity<Workspace>,
-) -> PopupMenuItem {
-    let label = match switch_to {
-        Some(fallback) => format!("Delete branch and switch to {fallback}"),
-        None => "Delete branch".to_string(),
-    };
-    let workspace = workspace.clone();
-    let branch = branch.clone();
-
-    PopupMenuItem::new(label).on_click(move |_, window, cx| {
-        let _ = workspace.update(cx, |workspace, cx| {
-            workspace.delete_local_branch(branch.clone(), window, cx);
-        });
-    })
 }
 
 fn tree_item(

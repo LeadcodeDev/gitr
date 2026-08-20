@@ -61,6 +61,7 @@ use crate::{
         About, MinimizeWindow, OpenFromDisk, Quit, SynchroniseActiveProject, ToggleDetailPanel,
         ToggleSidebar, UseDarkTheme, UseLightTheme, UseSystemTheme, ZoomWindow,
     },
+    branch_actions::Deletion,
     detail::DetailPanel,
     history::{HistoryPanel, HistoryPanelEvent},
     persistence,
@@ -68,7 +69,9 @@ use crate::{
         Project, ProjectList, ProjectSource, RemoteProject, display_name, remote_cache_dir,
         resolve_repository_root, validate_remote_url,
     },
-    repository::{History, HistoryFilter, LoadState, RepositoryEvent, RepositoryState},
+    repository::{
+        History, HistoryFilter, LoadState, ReferenceIndex, RepositoryEvent, RepositoryState,
+    },
     sidebar::{self, selector::CloningStatus},
     theme_preference::ThemePreference,
 };
@@ -288,6 +291,8 @@ impl Workspace {
         let (history_panel, detail_panel, detail_slot) =
             restored.unwrap_or_else(|| install_default_layout(&dock_area, window, cx));
 
+        let this = cx.entity().downgrade();
+        history_panel.update(cx, |panel, cx| panel.set_workspace(this, cx));
         sync_panels_from_repository(&repository, &history_panel, &detail_panel, cx);
 
         let repository_subscription =
@@ -638,9 +643,10 @@ impl Workspace {
             RepositoryEvent::HistoryChanged => {
                 let history = repository.read(cx).history().clone();
                 let head = repository.read(cx).head().clone();
+                let deletion = deletion_context(repository, cx);
                 self.history_panel.update(cx, |panel, cx| {
                     panel.set_history(history, cx);
-                    panel.set_head(head_branch(&head), head_commit(&head), cx);
+                    panel.set_head(deletion, head_commit(&head), cx);
                 });
                 cx.notify();
             }
@@ -1264,11 +1270,23 @@ fn sync_panels_from_repository(
     let history = repository.read(cx).history().clone();
     let detail = repository.read(cx).detail().clone();
     let head = repository.read(cx).head().clone();
+    let deletion = deletion_context(repository, cx);
     history_panel.update(cx, |panel, cx| {
         panel.set_history(history, cx);
-        panel.set_head(head_branch(&head), head_commit(&head), cx);
+        panel.set_head(deletion, head_commit(&head), cx);
     });
     detail_panel.update(cx, |panel, cx| panel.set_detail(detail, cx));
+}
+
+fn deletion_context(repository: &Entity<RepositoryState>, cx: &App) -> Deletion {
+    let state = repository.read(cx);
+    Deletion {
+        head: head_branch(state.head()),
+        fallback: state
+            .references()
+            .ready()
+            .and_then(ReferenceIndex::fallback_branch),
+    }
 }
 
 fn head_branch(head: &LoadState<HeadState>) -> Option<BranchName> {

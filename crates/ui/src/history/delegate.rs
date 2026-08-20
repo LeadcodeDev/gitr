@@ -11,17 +11,20 @@ use std::sync::Arc;
 use domain::{BranchName, CommitSummary, ObjectId, Reference};
 use gpui::{
     AnyElement, App, Bounds, Context, Div, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathBuilder, Pixels, SharedString, Stateful, Styled as _, Window, canvas,
-    div, fill, point, px, size,
+    ParentElement as _, PathBuilder, Pixels, SharedString, Stateful, Styled as _, WeakEntity,
+    Window, canvas, div, fill, point, px, size,
 };
 use gpui_component::{
     ActiveTheme as _, ThemeColor, h_flex,
+    menu::ContextMenuExt as _,
     table::{Column, TableDelegate, TableState},
 };
 use graph::GraphRow;
 
+use crate::branch_actions::{Deletion, delete_menu_item};
 use crate::graph_palette::lane_color;
 use crate::repository::model::{History, HistoryFilter, LoadState};
+use crate::workspace::Workspace;
 
 use super::{badges, format, geometry};
 
@@ -51,8 +54,9 @@ pub(crate) struct HistoryTableDelegate {
     filter: HistoryFilter,
     visible_indices: Vec<usize>,
     graph_width: Pixels,
-    head_branch: Option<BranchName>,
+    deletion: Deletion,
     head_commit: Option<ObjectId>,
+    workspace: Option<WeakEntity<Workspace>>,
 }
 
 impl HistoryTableDelegate {
@@ -62,14 +66,19 @@ impl HistoryTableDelegate {
             filter: HistoryFilter::default(),
             visible_indices: Vec::new(),
             graph_width: geometry::LANE_SPACING,
-            head_branch: None,
+            deletion: Deletion::default(),
             head_commit: None,
+            workspace: None,
         }
     }
 
-    pub(crate) fn set_head(&mut self, branch: Option<BranchName>, commit: Option<ObjectId>) {
-        self.head_branch = branch;
+    pub(crate) fn set_head(&mut self, deletion: Deletion, commit: Option<ObjectId>) {
+        self.deletion = deletion;
         self.head_commit = commit;
+    }
+
+    pub(crate) fn set_workspace(&mut self, workspace: WeakEntity<Workspace>) {
+        self.workspace = Some(workspace);
     }
 
     pub(crate) fn set_history(&mut self, history: LoadState<Arc<History>>) {
@@ -215,7 +224,8 @@ impl TableDelegate for HistoryTableDelegate {
             SUBJECT_COLUMN => subject_cell(
                 commit,
                 history.references_at(commit.id),
-                self.head_branch.as_ref(),
+                &self.deletion,
+                self.workspace.as_ref(),
                 &theme,
             ),
             AUTHOR_COLUMN => author_cell(commit),
@@ -313,20 +323,47 @@ fn graph_cell(row: GraphRow, is_head: bool, theme: &ThemeColor) -> AnyElement {
 fn subject_cell(
     commit: &CommitSummary,
     references: &[Reference],
-    head_branch: Option<&BranchName>,
+    deletion: &Deletion,
+    workspace: Option<&WeakEntity<Workspace>>,
     theme: &ThemeColor,
 ) -> AnyElement {
+    let head_branch = deletion.head.as_ref();
+
     h_flex()
         .h_full()
         .items_center()
         .gap_1()
         .px_2()
         .overflow_hidden()
-        .children(references.iter().map(|reference| {
-            badges::render_badge(reference, head_branch, theme).into_any_element()
+        .children(references.iter().enumerate().map(|(index, reference)| {
+            let badge = badges::render_badge(reference, head_branch, theme);
+            match deletable_branch(reference, deletion, workspace) {
+                Some((branch, switch_to, workspace)) => div()
+                    .id(("branch-badge", index))
+                    .child(badge)
+                    .context_menu(move |menu, _, _| {
+                        menu.item(delete_menu_item(&branch, switch_to.as_ref(), &workspace))
+                    })
+                    .into_any_element(),
+                None => badge.into_any_element(),
+            }
         }))
         .child(div().truncate().child(commit.summary.clone()))
         .into_any_element()
+}
+
+type DeletableBranch = (BranchName, Option<BranchName>, WeakEntity<Workspace>);
+
+fn deletable_branch(
+    reference: &Reference,
+    deletion: &Deletion,
+    workspace: Option<&WeakEntity<Workspace>>,
+) -> Option<DeletableBranch> {
+    let Reference::LocalBranch(branch) = reference else {
+        return None;
+    };
+    let switch_to = deletion.switch_to(branch)?;
+    Some((branch.clone(), switch_to, workspace?.clone()))
 }
 
 fn author_cell(commit: &CommitSummary) -> AnyElement {
