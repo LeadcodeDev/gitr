@@ -243,7 +243,6 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
             let strokes = row_geometry
                 .incoming
                 .iter()
-                .chain(row_geometry.crossings.iter())
                 .chain(row_geometry.outgoing.iter());
 
             for segment in strokes {
@@ -257,43 +256,15 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
                 );
                 let color = lane_color(segment.color, &theme);
 
-                let bend = segment
-                    .bend
-                    .map(|bend| point(bounds.origin.x + bend.x, bounds.origin.y + bend.y));
-                let legs = match bend {
-                    Some(bend) => vec![(top, bend), (bend, bottom)],
-                    None => vec![(top, bottom)],
-                };
-
-                if let Some(bend) = bend {
-                    let radius = geometry::DIAGONAL_LINE_WIDTH * 0.5;
-                    window.paint_quad(
-                        fill(
-                            Bounds {
-                                origin: point(bend.x - radius, bend.y - radius),
-                                size: size(radius * 2., radius * 2.),
-                            },
-                            color,
-                        )
-                        .corner_radii(radius),
-                    );
-                }
-
-                for (start, end) in legs {
-                    if start == end {
-                        continue;
-                    }
-                    let width = if start.x == end.x {
-                        geometry::LINE_WIDTH
-                    } else {
-                        geometry::DIAGONAL_LINE_WIDTH
-                    };
-                    let mut builder = PathBuilder::stroke(width);
-                    builder.move_to(start);
-                    builder.line_to(end);
-                    if let Ok(path) = builder.build() {
-                        window.paint_path(path, color);
-                    }
+                let mut builder = PathBuilder::stroke(if top.x == bottom.x {
+                    geometry::LINE_WIDTH
+                } else {
+                    geometry::DIAGONAL_LINE_WIDTH
+                });
+                builder.move_to(top);
+                builder.line_to(bottom);
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, color);
                 }
             }
 
@@ -395,7 +366,6 @@ mod tests {
             color: LaneColor(color),
             segments,
             incoming: Vec::new(),
-            next_lane: None,
         }
     }
 

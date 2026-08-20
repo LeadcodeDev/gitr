@@ -17,7 +17,7 @@
 
 use domain::{CommitSummary, ObjectId};
 
-use crate::model::{GraphLayout, GraphRow, IncomingLink, Lane, LaneColor, PALETTE_SIZE, Segment};
+use crate::model::{GraphLayout, GraphRow, Lane, LaneColor, PALETTE_SIZE, Segment};
 
 #[derive(Clone, Copy)]
 struct Track {
@@ -32,9 +32,9 @@ struct Placement {
     color: LaneColor,
     /// Incoming column to outgoing column, one entry per line crossing the row.
     mapping: Vec<Segment>,
-    /// Outgoing columns this commit opened for a second or later parent.
-    spawned: Vec<usize>,
-    reserved: bool,
+    /// Columns this commit opened for a second or later parent, with their colours.
+    spawned: Vec<(usize, LaneColor)>,
+    has_parents: bool,
 }
 
 pub fn layout(commits: &[CommitSummary]) -> GraphLayout {
@@ -73,7 +73,6 @@ pub fn layout(commits: &[CommitSummary]) -> GraphLayout {
             });
         }
 
-        let reserved = position.is_some();
         let (position, color) = match (position, color) {
             (Some(at), Some(color)) => (at, color),
             _ => {
@@ -100,11 +99,12 @@ pub fn layout(commits: &[CommitSummary]) -> GraphLayout {
             {
                 continue;
             }
+            let color = allocate_color(&mut palette_cursor);
             next.push(Some(Track {
                 commit: parent,
-                color: allocate_color(&mut palette_cursor),
+                color,
             }));
-            spawned.push(next.len() - 1);
+            spawned.push((next.len() - 1, color));
         }
 
         width = width.max(lanes.len() as u16).max(next.len() as u16);
@@ -113,79 +113,61 @@ pub fn layout(commits: &[CommitSummary]) -> GraphLayout {
             color,
             mapping,
             spawned,
-            reserved,
+            has_parents: !commit.parents.is_empty(),
         });
         lanes = next;
     }
 
-    let trailing = identity_mapping(&lanes);
-    let rows = assemble(commits, &placements, trailing);
+    let rows = assemble(commits, &placements);
     GraphLayout { rows, width }
 }
 
-/// Turns per-row placements into rows, whose segments describe the band *below* them.
+/// Turns per-row placements into rows, split the way GitX draws a cell: one set of lines
+/// crossing the upper half into the row's centre, one crossing the lower half out of it.
 ///
-/// A row's band is bounded by its own outgoing columns above and the next row's below, so
-/// the band's segments are the next row's mapping — read one row later than they are
-/// computed. A line the row opened for a second parent starts at the node rather than at
-/// the column it lands in, which is what `spawned` records.
-fn assemble(
-    commits: &[CommitSummary],
-    placements: &[Placement],
-    trailing: Vec<Segment>,
-) -> Vec<GraphRow> {
+/// A line that changes column does so in the upper half, arriving at the centre already in
+/// its new one. The lower half is therefore vertical, except for a merge's second parent,
+/// which leaves the node sideways.
+fn assemble(commits: &[CommitSummary], placements: &[Placement]) -> Vec<GraphRow> {
     let mut rows = Vec::with_capacity(commits.len());
 
-    for (index, (commit, placement)) in commits.iter().zip(placements).enumerate() {
+    for (commit, placement) in commits.iter().zip(placements) {
         let lane = Lane(placement.position as u16);
-        let below = placements.get(index + 1);
 
-        let mut segments = below.map_or_else(|| trailing.clone(), |next| next.mapping.clone());
-        for segment in &mut segments {
-            if placement.spawned.contains(&(segment.from.0 as usize)) {
-                segment.from = lane;
+        let mut segments: Vec<Segment> = Vec::with_capacity(placement.mapping.len());
+        for segment in &placement.mapping {
+            if segments.iter().any(|kept: &Segment| kept.to == segment.to) {
+                continue;
             }
+            segments.push(Segment {
+                from: segment.to,
+                to: segment.to,
+                color: segment.color,
+            });
         }
-
-        let incoming = if placement.reserved {
-            placement
-                .mapping
-                .iter()
-                .filter(|segment| segment.to == lane)
-                .map(|segment| IncomingLink {
-                    from: segment.from,
-                    color: segment.color,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        if placement.has_parents && !segments.iter().any(|segment| segment.to == lane) {
+            segments.push(Segment {
+                from: lane,
+                to: lane,
+                color: placement.color,
+            });
+        }
+        segments.retain(|segment| placement.has_parents || segment.to != lane);
+        segments.extend(placement.spawned.iter().map(|&(column, color)| Segment {
+            from: lane,
+            to: Lane(column as u16),
+            color,
+        }));
 
         rows.push(GraphRow {
             commit: commit.id,
             lane,
             color: placement.color,
             segments,
-            incoming,
-            next_lane: below.map(|next| Lane(next.position as u16)),
+            incoming: placement.mapping.clone(),
         });
     }
     rows
-}
-
-/// Every surviving column continuing straight down, for the band below the last row.
-fn identity_mapping(lanes: &[Option<Track>]) -> Vec<Segment> {
-    lanes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, slot)| {
-            slot.map(|track: Track| Segment {
-                from: Lane(index as u16),
-                to: Lane(index as u16),
-                color: track.color,
-            })
-        })
-        .collect()
 }
 
 /// Hands out the next palette slot, cycling through [`PALETTE_SIZE`] colours.
