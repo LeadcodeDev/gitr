@@ -134,12 +134,19 @@ with `Sorting::DateOrder` reproduces `git rev-list --date-order` exactly — ver
 diffing the two sequences over this repository. That builder is the way in either case: it
 is not exposed on gix's high-level `rev_walk`.
 
-The order was topological until the graph was rewritten, on a measurement that no longer
-holds: with the old lane-compacting layout, `rust-lang/cargo` at 23 789 commits gave 258
-lanes in date order against 20 topologically. Measured again on the current layout, where a
-track keeps its column, `zed-industries/zed` at 39 565 commits gives **13 columns in date
-order against 17 topologically** — date order is now the narrower of the two. Do not restore
-the old ordering on the strength of the old number; re-measure if it comes up.
+The order was topological until the graph was made to match GitX. An older measurement
+argued for it — `rust-lang/cargo` at 23 789 commits, 258 lanes in date order against 20
+topologically — and it was taken before the walk seeded from every reference, so it does
+not describe this code. Measured on the current code, `zed-industries/zed` at 39 565
+commits gives **13 columns in date order against 17 topologically**: date order is the
+narrower of the two here. Do not restore the old ordering on the strength of the old
+number; re-measure if it comes up.
+
+**Lane placement follows GitX's `PBGitGrapher`, which compacts.** A row's columns are
+rebuilt by walking the previous row's and appending the survivors in order, so a track's
+column is its position among them and everything to the right of an ending track slides
+left. Giving each track a column it keeps was tried and reverted: it is arguably easier to
+follow, but it is not what GitX draws, and matching GitX is the requirement.
 
 **Network and mutating Git operations go through subprocess `git`, never a library.**
 libssh2 does not read `~/.ssh/config`, so `Host` aliases and `ProxyCommand` silently break.

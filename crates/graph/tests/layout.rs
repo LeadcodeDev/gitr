@@ -151,7 +151,7 @@ fn a_branch_that_diverges_and_merges_back_frees_its_lane_again() {
 }
 
 #[test]
-fn an_independent_root_keeps_its_column_when_the_one_beside_it_ends() {
+fn two_independent_roots_each_get_their_own_lane() {
     let commits = [
         commit("a2", Parents::Linear(oid("a1"))),
         commit("b2", Parents::Linear(oid("b1"))),
@@ -168,14 +168,9 @@ fn an_independent_root_keeps_its_column_when_the_one_beside_it_ends() {
     assert_eq!(result.rows[1].segments, vec![seg(0, 0, 0), seg(1, 1, 1)]);
 
     assert_eq!(result.rows[2].lane, Lane(0));
-    assert_eq!(
-        result.rows[2].segments,
-        vec![seg(1, 1, 1)],
-        "the second root's track stays in its own column when the first one ends, \
-         rather than sliding left under a commit it has nothing to do with"
-    );
+    assert_eq!(result.rows[2].segments, vec![seg(1, 0, 1)]);
 
-    assert_eq!(result.rows[3].lane, Lane(1));
+    assert_eq!(result.rows[3].lane, Lane(0));
     assert!(result.rows[3].segments.is_empty());
 
     assert_eq!(result.width, 2);
@@ -203,16 +198,12 @@ fn an_octopus_merge_opens_one_lane_per_parent() {
     );
 
     assert_eq!(result.rows[1].lane, Lane(0));
-    assert_eq!(
-        result.rows[1].segments,
-        vec![seg(1, 1, 1), seg(2, 2, 2)],
-        "each parent holds the column it was given, so the eye can follow one down"
-    );
+    assert_eq!(result.rows[1].segments, vec![seg(1, 0, 1), seg(2, 1, 2)]);
 
-    assert_eq!(result.rows[2].lane, Lane(1));
-    assert_eq!(result.rows[2].segments, vec![seg(2, 2, 2)]);
+    assert_eq!(result.rows[2].lane, Lane(0));
+    assert_eq!(result.rows[2].segments, vec![seg(1, 0, 2)]);
 
-    assert_eq!(result.rows[3].lane, Lane(2));
+    assert_eq!(result.rows[3].lane, Lane(0));
     assert!(result.rows[3].segments.is_empty());
 
     assert_eq!(result.width, 3);
@@ -323,32 +314,4 @@ fn a_root_commit_emits_no_segment_of_its_own() {
         "nothing continues below a root, so its band draws nothing downward"
     );
     assert!(!layout.rows[0].has_incoming());
-}
-
-#[test]
-fn a_running_track_never_changes_column_when_another_one_ends() {
-    let commits = [
-        commit("main3", Parents::Linear(oid("main2"))),
-        commit("short", Parents::Linear(oid("base"))),
-        commit("long2", Parents::Linear(oid("long1"))),
-        commit("main2", Parents::Linear(oid("base"))),
-        commit("long1", Parents::Linear(oid("base"))),
-        commit("base", Parents::Root),
-    ];
-
-    let result = layout(&commits);
-
-    let long_columns: Vec<Lane> = result
-        .rows
-        .iter()
-        .filter(|row| row.commit == oid("long2") || row.commit == oid("long1"))
-        .map(|row| row.lane)
-        .collect();
-
-    assert_eq!(
-        long_columns,
-        vec![Lane(2), Lane(2)],
-        "the long track holds column two across the row where the short branch ends, \
-         instead of sliding into the space it left"
-    );
 }
