@@ -254,6 +254,20 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
                     None => vec![(top, bottom)],
                 };
 
+                if let Some(bend) = bend {
+                    let radius = geometry::DIAGONAL_LINE_WIDTH * 0.5;
+                    window.paint_quad(
+                        fill(
+                            Bounds {
+                                origin: point(bend.x - radius, bend.y - radius),
+                                size: size(radius * 2., radius * 2.),
+                            },
+                            color,
+                        )
+                        .corner_radii(radius),
+                    );
+                }
+
                 for (start, end) in legs {
                     if start == end {
                         continue;
