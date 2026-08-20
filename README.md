@@ -74,6 +74,11 @@ not libraries, so it takes the prefixed form.
 `gitr-domain` and `gitr-graph` do not depend on gpui, so `cargo test -p gitr-domain -p
 gitr-graph` runs in seconds rather than minutes.
 
+## Contributing
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) covers the build, the test loop, and the
+architectural rule a change has to respect.
+
 ## License
 
 [Apache 2.0](LICENSE).
