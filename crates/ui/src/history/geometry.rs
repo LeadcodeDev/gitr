@@ -99,12 +99,13 @@ pub fn row_geometry(row: &GraphRow, row_height: Pixels, lane_spacing: Pixels) ->
                 color: segment.color,
             }
         } else if is_outgoing && row.lands_on_next_node(segment) {
-            let edge_x = midpoint_x(segment.from, segment.to, lane_spacing);
-            let slant = slant_height(segment.from, segment.to, lane_spacing, row_height * 0.5);
             SegmentGeometry {
                 top,
-                bend: Some(point(from_x, row_height - slant * 0.5)),
-                bottom: point(edge_x, row_height),
+                bend: Some(point(from_x, row_height * 0.5 + NODE_RADIUS)),
+                bottom: point(
+                    midpoint_x(segment.from, segment.to, lane_spacing),
+                    row_height,
+                ),
                 color: segment.color,
             }
         } else {
@@ -136,10 +137,9 @@ pub fn row_geometry(row: &GraphRow, row_height: Pixels, lane_spacing: Pixels) ->
                     color: link.color,
                 };
             }
-            let slant = slant_height(link.from, row.lane, lane_spacing, row_height * 0.5);
             SegmentGeometry {
                 top: point(midpoint_x(link.from, row.lane, lane_spacing), Pixels::ZERO),
-                bend: Some(point(node_center.x, slant * 0.5)),
+                bend: Some(point(node_center.x, row_height * 0.5 - NODE_RADIUS)),
                 bottom: node_center,
                 color: link.color,
             }
@@ -160,6 +160,9 @@ pub fn row_geometry(row: &GraphRow, row_height: Pixels, lane_spacing: Pixels) ->
 /// One lane of sideways travel per lane of downward travel, so a slant sits at forty-five
 /// degrees however many lanes it crosses — and is clamped to the room actually available,
 /// which is what keeps a wide jump inside its band instead of running past the edge.
+///
+/// Only crossings use this. A link that touches a node runs to the node's edge instead,
+/// so that no straight stub is left between the slant and the circle.
 fn slant_height(from: Lane, to: Lane, lane_spacing: Pixels, available: Pixels) -> Pixels {
     let lanes = from.0.abs_diff(to.0).max(1) as usize;
     (lane_spacing * lanes).min(available)
