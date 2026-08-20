@@ -29,8 +29,21 @@ import zlib
 
 HERE = pathlib.Path(__file__).parent
 
-GRID = 11
-SCALE = 96
+# macOS does not fill the icon canvas. Measured on Mail, Messages, Music and Slack,
+# every one puts its artwork on 824 of 1024 pixels — 80.5% — and leaves the rest
+# transparent; the dock lays out the canvas, so an icon that fills its own reads at the
+# wrong size beside them. 22 grid units at 37 gives 814, inset by 105 on each side of a
+# 1024 canvas: 79.5%, within a percent of Apple's grid and, unlike 824, a whole number
+# of pixels per grid unit.
+GRID = 22
+SCALE = 37
+CANVAS = 1024
+PLATE_RADIUS = 5
+
+# The crab keeps its 9x9 structure but occupies two grid units per pixel. Drawing the
+# plate on the finer grid is what buys the corner radius: 5 of 22 is 22.7%, against
+# Apple's 22.5%, where 11 units could only offer 18% or 27%.
+CRAB_SCALE = 2
 
 PALETTE = {
     ".": (0, 0, 0, 0),
@@ -51,12 +64,12 @@ CRAB = [
     "o.OOOOO.o",
 ]
 
-# 9 wide and 7 tall on an 11 grid: the only offsets that centre it exactly on both
-# axes. A pixel off-centre is visible at this scale and reads as a mistake.
-CRAB_AT = ((GRID - 9) // 2, (GRID - 7) // 2)
+# 18 wide and 14 tall on a 22 grid, so both offsets land on whole units and the crab
+# centres exactly. A pixel off-centre is visible at this scale and reads as a mistake.
+CRAB_AT = ((GRID - 9 * CRAB_SCALE) // 2, (GRID - 7 * CRAB_SCALE) // 2)
 
 
-def plate(px, radius=3):
+def plate(px, radius=PLATE_RADIUS):
     """The rounded square macOS expects, corners stepped rather than antialiased —
     a smooth corner beside hard-edged art reads as an accident."""
     for y in range(GRID):
@@ -71,8 +84,11 @@ def crab(px):
     ox, oy = CRAB_AT
     for j, row in enumerate(CRAB):
         for i, ch in enumerate(row):
-            if ch != ".":
-                px[oy + j][ox + i] = ch
+            if ch == ".":
+                continue
+            for dy in range(CRAB_SCALE):
+                for dx in range(CRAB_SCALE):
+                    px[oy + j * CRAB_SCALE + dy][ox + i * CRAB_SCALE + dx] = ch
 
 
 def write_png(path, rows):
@@ -98,14 +114,24 @@ def main():
     plate(px)
     crab(px)
 
-    side = GRID * SCALE
+    art = GRID * SCALE
+    inset = (CANVAS - art) // 2
+    blank = PALETTE["."]
     rows = [
-        [PALETTE[px[y // SCALE][x // SCALE]] for x in range(side)]
-        for y in range(side)
+        [
+            PALETTE[px[(y - inset) // SCALE][(x - inset) // SCALE]]
+            if inset <= x < inset + art and inset <= y < inset + art
+            else blank
+            for x in range(CANVAS)
+        ]
+        for y in range(CANVAS)
     ]
     out = HERE / "icon.png"
     write_png(out, rows)
-    print(f"wrote {out.name}: {side}x{side}, {out.stat().st_size} bytes")
+    print(
+        f"wrote {out.name}: {CANVAS}x{CANVAS} canvas, {art}px artwork "
+        f"({art / CANVAS:.1%}), inset {inset}, {out.stat().st_size} bytes"
+    )
 
 
 if __name__ == "__main__":
