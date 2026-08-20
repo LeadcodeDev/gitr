@@ -24,17 +24,16 @@ const THEME_PREFERENCE_FILE: &str = "theme-preference.json";
 const PROJECTS_FILE: &str = "projects.json";
 const REMOTE_CACHE_DIR: &str = "remotes";
 
+pub fn application_support_dir() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("HOME")?).join(APPLICATION_SUPPORT_DIR))
+}
+
 /// Where the dock layout lives for the signed-in user, or `None` if `$HOME` is unset.
 ///
 /// Not cached: resolving `$HOME` is one `env::var_os` call, cheap enough to redo on every
 /// save rather than risk a stale value if the process environment ever changed.
 pub fn dock_layout_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join(APPLICATION_SUPPORT_DIR)
-            .join(DOCK_LAYOUT_FILE),
-    )
+    Some(application_support_dir()?.join(DOCK_LAYOUT_FILE))
 }
 
 /// Persists `state` to `path`, creating its parent directory if it does not exist yet.
@@ -74,12 +73,7 @@ pub fn load() -> Option<DockAreaState> {
 /// Where the theme preference lives for the signed-in user, or `None` if `$HOME` is
 /// unset. See [`dock_layout_path`] — same directory, same not-cached reasoning.
 pub fn theme_preference_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join(APPLICATION_SUPPORT_DIR)
-            .join(THEME_PREFERENCE_FILE),
-    )
+    Some(application_support_dir()?.join(THEME_PREFERENCE_FILE))
 }
 
 /// Persists `preference` to `path`, creating its parent directory if it does not exist
@@ -115,12 +109,7 @@ pub fn load_theme_preference() -> Option<ThemePreference> {
 /// Where the project list lives for the signed-in user, or `None` if `$HOME` is unset.
 /// See [`dock_layout_path`] — same directory, same not-cached reasoning.
 pub fn project_list_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join(APPLICATION_SUPPORT_DIR)
-            .join(PROJECTS_FILE),
-    )
+    Some(application_support_dir()?.join(PROJECTS_FILE))
 }
 
 /// Persists `list` to `path`, creating its parent directory if it does not exist yet.
@@ -163,12 +152,7 @@ pub fn load_project_list() -> Option<ProjectList> {
 /// or is asked to pick — [`crate::project::remote_cache_dir`] derives a specific clone's
 /// directory underneath it from the URL alone.
 pub fn remote_cache_root() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join(APPLICATION_SUPPORT_DIR)
-            .join(REMOTE_CACHE_DIR),
-    )
+    Some(application_support_dir()?.join(REMOTE_CACHE_DIR))
 }
 
 #[cfg(test)]

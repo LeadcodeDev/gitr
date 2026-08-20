@@ -150,6 +150,21 @@ helper, SSH fails with `no authentication methods succeeded` because libgit2 rea
 `~/.ssh/config` nor the agent, and only `--config net.git-fetch-with-cli=true` — which
 hands the fetch to the `git` binary — gets through.
 
+**`AsyncApp` is not `Send`.** It holds `Weak<AppCell>` and an `Rc`, so nothing off the main
+thread can call into gpui through it. A background thread reaching the app — the
+single-instance listener in `crates/gitr/src/instance.rs` is the case in the tree — hands
+its result over an `async_channel` whose receiver is awaited inside `cx.spawn`. Reaching
+for `AsyncApp` in the thread instead does not compile, but it is the obvious first design
+and worth not attempting twice.
+
+**One gitr process, whatever the number of open repositories.** A second `gitr <path>`
+offers the resolved root to a Unix socket in the application support directory and exits;
+the live instance opens another window. Two things that look optional are not: a socket
+file outlives the process that made it, so `bind` must probe with a connect and unlink a
+stale one rather than trusting the file's absence, and two invocations racing both reach
+the bind, so the loser must hand its path to the winner instead of reporting a failure the
+user cannot act on.
+
 **No blocking modal for long operations.** GitX crashes on
 `assert(currentModalSheet == nil)` when two network operations overlap. Long work runs on
 `cx.background_executor()` and reports through the status bar and notifications.

@@ -11,7 +11,16 @@
 //!
 //! `gitr` runs as two processes. The one the shell starts resolves the repository, saves
 //! the project list, relaunches itself detached and exits, which is what gives the prompt
-//! straight back; the detached one opens the window. Validation stays in the first,
+//! straight back; the detached one opens the window.
+//!
+//! Only ever one detached process, though. Before relaunching, the first process offers
+//! the resolved root to a Unix socket under gitr's application support directory. A live
+//! instance takes it and opens another window, so the dock keeps one icon however many
+//! repositories are open; a refused connection means nothing is listening and the
+//! relaunch proceeds as before. The detached process claims that socket, and unlinks a
+//! stale one left by a process that was killed — a socket file outlives its process, so
+//! its mere existence proves nothing. Two invocations racing both reach the bind, and the
+//! loser hands its path to the winner rather than failing. Validation stays in the first,
 //! deliberately: a detached process has its streams on `/dev/null`, so an error reported
 //! there would vanish, and `gitr /nonexistent` has to keep failing in the terminal the
 //! user is looking at. `GITR_FOREGROUND` marks the second process, and setting it by hand
@@ -34,6 +43,8 @@
 //! actions, and belongs here for the same reason: a menu item is only ever enabled by a
 //! global handler, never by one on the window's element tree.
 
+mod instance;
+
 use std::env;
 use std::io;
 use std::os::unix::process::CommandExt as _;
@@ -41,7 +52,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use domain::RepositoryError;
-use gpui::{App, AppContext};
+use gpui::{App, AppContext, AsyncApp};
 use gpui_component::{Root, TitleBar};
 use ui::Workspace;
 use ui::actions::Quit;
@@ -60,7 +71,7 @@ fn main() -> ExitCode {
             .and_then(|cwd| activate_repository_at(&cwd, &mut projects)),
     };
 
-    if let Err(error) = outcome
+    if let Err(error) = &outcome
         && aborts_launch(requested.is_some(), projects.projects.len())
     {
         eprintln!("gitr: {error}");
@@ -71,7 +82,14 @@ fn main() -> ExitCode {
         eprintln!("gitr: failed to save project list: {error:#}");
     }
 
+    let opened_root = outcome.unwrap_or_default();
+
     if env::var_os(FOREGROUND).is_none() {
+        if let Some(socket) = instance::socket_path()
+            && instance::hand_off_to(&socket, &opened_root)
+        {
+            return ExitCode::SUCCESS;
+        }
         return match relaunch_detached() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -79,6 +97,26 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+
+    let listener = match instance::socket_path().map(|socket| (instance::bind(&socket), socket)) {
+        Some((Ok(instance::Bound::AlreadyRunning), socket)) => {
+            instance::hand_off_to(&socket, &opened_root);
+            return ExitCode::SUCCESS;
+        }
+        Some((Ok(instance::Bound::Listening(listener)), _)) => Some(listener),
+        Some((Err(error), _)) => {
+            eprintln!("gitr: could not claim the single-instance socket: {error}");
+            None
+        }
+        None => None,
+    };
+
+    let (sender, requests) = async_channel::unbounded::<PathBuf>();
+    if let Some(listener) = listener {
+        instance::serve(listener, move |root| {
+            let _ = sender.send_blocking(root);
+        });
     }
 
     gpui_platform::application()
@@ -90,15 +128,24 @@ fn main() -> ExitCode {
             set_dock_icon();
 
             let projects = projects.clone();
+            let requests = requests.clone();
             cx.spawn(async move |cx| {
-                cx.open_window(TitleBar::window_options(), |window, cx| {
-                    let workspace = cx.new(|cx| Workspace::new(projects, window, cx));
-                    Workspace::register_menu_actions(&workspace, window, cx);
-                    cx.new(|cx| Root::new(workspace, window, cx))
-                })
-                .expect("gitr cannot run without a window");
-
+                open_window(projects, cx).expect("gitr cannot run without a window");
                 cx.update(|cx| cx.activate(true));
+
+                while let Ok(root) = requests.recv().await {
+                    if !root.as_os_str().is_empty() {
+                        let mut projects = project_list_at_startup();
+                        projects.add_or_activate(Project::local(root));
+                        if let Err(error) = persistence::save_project_list(&projects) {
+                            eprintln!("gitr: failed to save project list: {error:#}");
+                        }
+                        if open_window(projects, cx).is_err() {
+                            continue;
+                        }
+                    }
+                    cx.update(|cx| cx.activate(true));
+                }
             })
             .detach();
         });
@@ -136,6 +183,15 @@ fn set_dock_icon() {
     };
 
     unsafe { NSApplication::sharedApplication(main_thread).setApplicationIconImage(Some(&image)) };
+}
+
+fn open_window(projects: ProjectList, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    cx.open_window(TitleBar::window_options(), |window, cx| {
+        let workspace = cx.new(|cx| Workspace::new(projects, window, cx));
+        Workspace::register_menu_actions(&workspace, window, cx);
+        cx.new(|cx| Root::new(workspace, window, cx))
+    })?;
+    Ok(())
 }
 
 /// Set on the process that opens the window, so it runs the event loop instead of
@@ -186,10 +242,13 @@ fn aborts_launch(path_was_requested: bool, saved_projects: usize) -> bool {
 /// `start` is a directory *inside* the repository, not necessarily its root:
 /// [`resolve_repository_root`] walks upwards until it finds the `.git` entry, so running
 /// `gitr` deep inside a checkout opens the whole repository rather than failing.
-fn activate_repository_at(start: &Path, projects: &mut ProjectList) -> Result<(), RepositoryError> {
+fn activate_repository_at(
+    start: &Path,
+    projects: &mut ProjectList,
+) -> Result<PathBuf, RepositoryError> {
     let root = resolve_repository_root(start)?;
-    projects.add_or_activate(Project::local(root));
-    Ok(())
+    projects.add_or_activate(Project::local(root.clone()));
+    Ok(root)
 }
 
 /// Reads the persisted project list, logging and starting empty on a genuine failure to
