@@ -11,7 +11,7 @@
 
 use domain::{Commit, Parents};
 use gpui::{AnyElement, App, IntoElement, ParentElement as _, SharedString, Styled as _, div, px};
-use gpui_component::{ActiveTheme as _, text};
+use gpui_component::{ActiveTheme as _, Sizable as _, tag::Tag, text};
 
 use super::format::{abbreviate, escape_markdown, format_timestamp};
 
@@ -21,19 +21,23 @@ pub(super) fn render_header(commit: &Commit, cx: &App) -> impl IntoElement {
     let mono = cx.theme().mono_font_family.clone();
 
     let mut rows = vec![
-        row("Subject", selectable(&commit.summary, cx), cx),
+        row("Subject", selectable("subject", &commit.summary, cx), cx),
         row(
             "ID",
-            selectable_mono(&commit.id.to_string(), mono.clone(), cx),
+            selectable_mono("id", &commit.id.to_string(), mono.clone(), cx),
             cx,
         ),
     ];
 
-    if let Some(parents) = parents_line(&commit.parents) {
-        rows.push(row("Parents", selectable_mono(&parents, mono, cx), cx));
+    if let Some(parents) = parent_badges(&commit.parents, mono, cx) {
+        rows.push(row("Parents", parents, cx));
     }
 
-    rows.push(row("Author", selectable(&author_line(commit), cx), cx));
+    rows.push(row(
+        "Author",
+        selectable("author", &author_line(commit), cx),
+        cx,
+    ));
 
     div().flex().flex_col().gap_1().p_3().children(rows)
 }
@@ -62,15 +66,15 @@ pub(super) fn render_description(commit: &Commit, cx: &App) -> Option<AnyElement
     )
 }
 
-fn selectable(value: &str, cx: &App) -> AnyElement {
-    text::markdown(escape_markdown(value))
+fn selectable(id: &'static str, value: &str, cx: &App) -> AnyElement {
+    text::TextView::markdown(id, escape_markdown(value))
         .selectable(true)
         .text_color(cx.theme().foreground)
         .into_any_element()
 }
 
-fn selectable_mono(value: &str, mono: SharedString, cx: &App) -> AnyElement {
-    text::markdown(escape_markdown(value))
+fn selectable_mono(id: &'static str, value: &str, mono: SharedString, cx: &App) -> AnyElement {
+    text::TextView::markdown(id, escape_markdown(value))
         .selectable(true)
         .font_family(mono)
         .text_color(cx.theme().foreground)
@@ -104,15 +108,30 @@ fn author_line(commit: &Commit) -> String {
     )
 }
 
-fn parents_line(parents: &Parents) -> Option<String> {
+fn parent_badges(parents: &Parents, mono: SharedString, cx: &App) -> Option<AnyElement> {
     if parents.is_empty() {
         return None;
     }
+
+    let foreground = cx.theme().foreground;
+    let badges = parents.iter().map(move |parent| {
+        Tag::custom(
+            foreground.opacity(0.08),
+            foreground.opacity(0.85),
+            foreground.opacity(0.22),
+        )
+        .rounded_full()
+        .xsmall()
+        .font_family(mono.clone())
+        .child(abbreviate(parent))
+    });
+
     Some(
-        parents
-            .iter()
-            .map(abbreviate)
-            .collect::<Vec<_>>()
-            .join(", "),
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .children(badges)
+            .into_any_element(),
     )
 }

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use domain::{HistoryScope, ObjectId, Reference};
+use domain::{BranchName, HistoryScope, ObjectId, Reference};
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     ParentElement as _, Render, Styled as _, Subscription, Window, div, px,
@@ -101,6 +101,14 @@ impl HistoryPanel {
     pub fn set_history(&mut self, history: LoadState<Arc<History>>, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
             table.delegate_mut().set_history(history);
+            table.refresh(cx);
+        });
+        cx.notify();
+    }
+
+    pub fn set_head_branch(&mut self, head_branch: Option<BranchName>, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
+            table.delegate_mut().set_head_branch(head_branch);
             table.refresh(cx);
         });
         cx.notify();
