@@ -142,11 +142,21 @@ commits gives **13 columns in date order against 17 topologically**: date order 
 narrower of the two here. Do not restore the old ordering on the strength of the old
 number; re-measure if it comes up.
 
-**Lane placement follows GitX's `PBGitGrapher`, which compacts.** A row's columns are
-rebuilt by walking the previous row's and appending the survivors in order, so a track's
-column is its position among them and everything to the right of an ending track slides
-left. Giving each track a column it keeps was tried and reverted: it is arguably easier to
-follow, but it is not what GitX draws, and matching GitX is the requirement.
+**Lane placement is a port of GitX's `PBGitGrapher.decorateCommit`, not an adaptation.**
+Columns compact — a row's are rebuilt by walking the previous row's and appending the
+survivors, so a column is a position among them and everything right of an ending track
+slides left. Giving each track a column it keeps was tried and reverted: easier to follow,
+but not what GitX draws.
+
+Two details carry the whole difference, and both were got wrong before being ported
+faithfully. **A commit's node sits at its index in the outgoing column list, not the
+incoming one** — they agree until a column dies in the same row a tip appears. And
+**convergence is deferred**: a first parent takes over its lane without checking whether
+another column already expects it, so two columns hold the same object until the row that
+places it. Converging eagerly closes a column a row early and shifts everything right of
+it. Verify any change here by running GitX's algorithm over a real history and diffing the
+column of every commit — ten of this repository's 53 were off by one before the port, and
+patching rather than porting took it to eighteen.
 
 **Network and mutating Git operations go through subprocess `git`, never a library.**
 libssh2 does not read `~/.ssh/config`, so `Host` aliases and `ProxyCommand` silently break.
