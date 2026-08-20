@@ -13,8 +13,16 @@ pub const LANE_SPACING: Pixels = px(12.);
 /// Radius of a commit's own node.
 pub const NODE_RADIUS: Pixels = px(3.);
 
-/// Stroke width of a graph line.
+/// Stroke width of a vertical graph line.
 pub const LINE_WIDTH: Pixels = px(1.5);
+
+/// Stroke width of a sloped graph line.
+///
+/// Wider than [`LINE_WIDTH`] on purpose. A vertical stroke lands square on the pixel grid
+/// and paints two columns at full strength; the same width on a diagonal spreads across
+/// three with two of them faint, so it carries the same ink and reads lighter. Matching
+/// the *perceived* weight is what the eye compares, not the declared width.
+pub const DIAGONAL_LINE_WIDTH: Pixels = px(2.1);
 
 /// The x coordinate of `lane`'s centre, relative to the gutter's left edge.
 pub fn lane_center_x(lane: Lane, lane_spacing: Pixels) -> Pixels {
@@ -36,9 +44,14 @@ pub fn gutter_width(lane_count: u16, lane_spacing: Pixels) -> Pixels {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SegmentGeometry {
     pub top: Point<Pixels>,
+    /// Where the line stops running straight down and slants across, if it does.
+    ///
+    /// A lane change is a short slant near the edge rather than a lean across the whole
+    /// band: the line belongs to its lane, and reads as belonging to it, right up to the
+    /// point where it leaves.
+    pub bend: Option<Point<Pixels>>,
     pub bottom: Point<Pixels>,
     pub color: LaneColor,
-    pub is_vertical: bool,
 }
 
 /// Everything a renderer needs to paint one [`GraphRow`]'s band.
@@ -56,7 +69,7 @@ pub struct SegmentGeometry {
 pub struct RowGeometry {
     pub node_center: Point<Pixels>,
     pub node_color: LaneColor,
-    pub incoming: Option<SegmentGeometry>,
+    pub incoming: Vec<SegmentGeometry>,
     pub crossings: Vec<SegmentGeometry>,
     pub outgoing: Vec<SegmentGeometry>,
 }
@@ -70,29 +83,68 @@ pub fn row_geometry(row: &GraphRow, row_height: Pixels, lane_spacing: Pixels) ->
     let mut outgoing = Vec::new();
 
     for segment in &row.segments {
-        let geometry = SegmentGeometry {
-            top: if row.is_outgoing(segment) {
-                node_center
-            } else {
-                point(lane_center_x(segment.from, lane_spacing), Pixels::ZERO)
-            },
-            bottom: point(lane_center_x(segment.to, lane_spacing), row_height),
-            color: segment.color,
-            is_vertical: segment.is_vertical(),
+        let is_outgoing = row.is_outgoing(segment);
+        let from_x = lane_center_x(segment.from, lane_spacing);
+        let top = if is_outgoing {
+            node_center
+        } else {
+            point(from_x, Pixels::ZERO)
         };
-        if row.is_outgoing(segment) {
+
+        let geometry = if segment.is_vertical() {
+            SegmentGeometry {
+                top,
+                bend: None,
+                bottom: point(from_x, row_height),
+                color: segment.color,
+            }
+        } else if is_outgoing && row.lands_on_next_node(segment) {
+            let edge_x = midpoint_x(segment.from, segment.to, lane_spacing);
+            let slant = slant_height(segment.from, segment.to, lane_spacing, row_height * 0.5);
+            SegmentGeometry {
+                top,
+                bend: Some(point(from_x, row_height - slant * 0.5)),
+                bottom: point(edge_x, row_height),
+                color: segment.color,
+            }
+        } else {
+            let slant = slant_height(segment.from, segment.to, lane_spacing, row_height - top.y);
+            SegmentGeometry {
+                top,
+                bend: Some(point(from_x, row_height - slant)),
+                bottom: point(lane_center_x(segment.to, lane_spacing), row_height),
+                color: segment.color,
+            }
+        };
+
+        if is_outgoing {
             outgoing.push(geometry);
         } else {
             crossings.push(geometry);
         }
     }
 
-    let incoming = row.has_incoming.then(|| SegmentGeometry {
-        top: point(node_center.x, Pixels::ZERO),
-        bottom: node_center,
-        color: row.color,
-        is_vertical: true,
-    });
+    let incoming = row
+        .incoming
+        .iter()
+        .map(|link| {
+            if link.from == row.lane {
+                return SegmentGeometry {
+                    top: point(node_center.x, Pixels::ZERO),
+                    bend: None,
+                    bottom: node_center,
+                    color: link.color,
+                };
+            }
+            let slant = slant_height(link.from, row.lane, lane_spacing, row_height * 0.5);
+            SegmentGeometry {
+                top: point(midpoint_x(link.from, row.lane, lane_spacing), Pixels::ZERO),
+                bend: Some(point(node_center.x, slant * 0.5)),
+                bottom: node_center,
+                color: link.color,
+            }
+        })
+        .collect();
 
     RowGeometry {
         node_center,
@@ -103,11 +155,30 @@ pub fn row_geometry(row: &GraphRow, row_height: Pixels, lane_spacing: Pixels) ->
     }
 }
 
+/// How much vertical room a lane change is given before it must be complete.
+///
+/// One lane of sideways travel per lane of downward travel, so a slant sits at forty-five
+/// degrees however many lanes it crosses — and is clamped to the room actually available,
+/// which is what keeps a wide jump inside its band instead of running past the edge.
+fn slant_height(from: Lane, to: Lane, lane_spacing: Pixels, available: Pixels) -> Pixels {
+    let lanes = from.0.abs_diff(to.0).max(1) as usize;
+    (lane_spacing * lanes).min(available)
+}
+
+/// Where a line between two lane centres crosses the edge between two row bands.
+///
+/// A link from a node to the node one row below spans half of each band, so the edge cuts
+/// it exactly in half. Both bands compute this from their own end and arrive at the same
+/// x, which is what makes the two halves one straight line rather than a dogleg.
+fn midpoint_x(from: Lane, to: Lane, lane_spacing: Pixels) -> Pixels {
+    (lane_center_x(from, lane_spacing) + lane_center_x(to, lane_spacing)) * 0.5
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use domain::ObjectId;
-    use graph::Segment;
+    use graph::{IncomingLink, Segment};
 
     fn id() -> ObjectId {
         "a".repeat(40).parse().unwrap()
@@ -119,8 +190,21 @@ mod tests {
             lane: Lane(lane),
             color: LaneColor(0),
             segments,
-            has_incoming,
+            incoming: if has_incoming {
+                vec![IncomingLink {
+                    from: Lane(lane),
+                    color: LaneColor(0),
+                }]
+            } else {
+                Vec::new()
+            },
+            next_lane: None,
         }
+    }
+
+    fn landing_on(mut row: GraphRow, next_lane: u16) -> GraphRow {
+        row.next_lane = Some(Lane(next_lane));
+        row
     }
 
     fn segment(from: u16, to: u16) -> Segment {
@@ -162,6 +246,68 @@ mod tests {
     }
 
     #[test]
+    fn a_link_to_the_node_one_row_down_meets_it_halfway_from_both_sides() {
+        let above = landing_on(row(1, false, vec![segment(1, 0)]), 0);
+        let below = GraphRow {
+            commit: id(),
+            lane: Lane(0),
+            color: LaneColor(0),
+            segments: vec![],
+            incoming: vec![IncomingLink {
+                from: Lane(1),
+                color: LaneColor(2),
+            }],
+            next_lane: None,
+        };
+
+        let top_half = row_geometry(&above, px(24.), px(16.));
+        let bottom_half = row_geometry(&below, px(24.), px(16.));
+
+        let leaves = top_half.outgoing[0];
+        let arrives = bottom_half.incoming[0];
+
+        assert_eq!(
+            leaves.bottom.x, arrives.top.x,
+            "the two halves of one straight line must meet at the same x, or it doglegs"
+        );
+        assert_eq!(leaves.top, top_half.node_center);
+        assert_eq!(arrives.bottom, bottom_half.node_center);
+        assert_eq!(leaves.bottom.x, px(16.));
+
+        let leaves_bend = leaves
+            .bend
+            .expect("the upper half runs straight down first");
+        let arrives_bend = arrives.bend.expect("the lower half straightens up again");
+        assert_eq!(
+            leaves_bend.x, leaves.top.x,
+            "the line must stay in its own lane until it bends"
+        );
+        assert_eq!(
+            arrives_bend.x, arrives.bottom.x,
+            "and must be back in the destination lane before reaching the node"
+        );
+        assert!(
+            leaves_bend.y > leaves.top.y,
+            "the vertical run comes before the slant, not after"
+        );
+    }
+
+    #[test]
+    fn a_lane_merely_reserved_for_a_later_commit_stays_in_its_own_lane() {
+        let geometry = row_geometry(
+            &landing_on(row(1, false, vec![segment(1, 0)]), 1),
+            px(24.),
+            px(16.),
+        );
+
+        assert_eq!(
+            geometry.outgoing[0].bottom,
+            point(px(8.), px(24.)),
+            "with the next node elsewhere, the link must reach its lane and meet a vertical"
+        );
+    }
+
+    #[test]
     fn a_crossing_spans_the_whole_band() {
         let geometry = row_geometry(&row(1, true, vec![segment(0, 0)]), px(24.), px(16.));
 
@@ -169,7 +315,7 @@ mod tests {
         assert!(geometry.outgoing.is_empty());
 
         let crossing = geometry.crossings[0];
-        assert!(crossing.is_vertical);
+        assert_eq!(crossing.bend, None);
         assert_eq!(crossing.top, point(px(8.), px(0.)));
         assert_eq!(crossing.bottom, point(px(8.), px(24.)));
     }
@@ -178,10 +324,9 @@ mod tests {
     fn a_commit_with_a_child_above_gets_a_stub_down_into_its_node() {
         let geometry = row_geometry(&row(1, true, vec![]), px(24.), px(16.));
 
-        let stub = geometry
-            .incoming
-            .expect("a lane already reserved above must reach the node");
-        assert!(stub.is_vertical);
+        assert_eq!(geometry.incoming.len(), 1);
+        let stub = geometry.incoming[0];
+        assert_eq!(stub.bend, None);
         assert_eq!(stub.top, point(px(24.), px(0.)));
         assert_eq!(
             stub.bottom, geometry.node_center,
@@ -194,7 +339,7 @@ mod tests {
         let geometry = row_geometry(&row(1, false, vec![segment(1, 1)]), px(24.), px(16.));
 
         assert!(
-            geometry.incoming.is_none(),
+            geometry.incoming.is_empty(),
             "nothing points at a tip from above, so no line may be drawn there"
         );
         assert_eq!(geometry.outgoing.len(), 1);
@@ -207,13 +352,7 @@ mod tests {
 
         assert!(geometry.outgoing.is_empty());
         assert!(geometry.crossings.is_empty());
-        assert_eq!(
-            geometry
-                .incoming
-                .expect("the root still receives the line from above")
-                .bottom,
-            geometry.node_center
-        );
+        assert_eq!(geometry.incoming[0].bottom, geometry.node_center);
     }
 
     #[test]

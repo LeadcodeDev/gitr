@@ -246,17 +246,43 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
                 );
                 let color = lane_color(segment.color, &theme);
 
-                let mut builder = PathBuilder::stroke(geometry::LINE_WIDTH);
-                builder.move_to(top);
-                if segment.is_vertical {
-                    builder.line_to(bottom);
-                } else {
-                    let mid_y = (top.y + bottom.y) * 0.5;
-                    builder.cubic_bezier_to(bottom, point(top.x, mid_y), point(bottom.x, mid_y));
+                let bend = segment
+                    .bend
+                    .map(|bend| point(bounds.origin.x + bend.x, bounds.origin.y + bend.y));
+                let legs = match bend {
+                    Some(bend) => vec![(top, bend), (bend, bottom)],
+                    None => vec![(top, bottom)],
+                };
+
+                if let Some(bend) = bend {
+                    let radius = geometry::DIAGONAL_LINE_WIDTH * 0.5;
+                    window.paint_quad(
+                        fill(
+                            Bounds {
+                                origin: point(bend.x - radius, bend.y - radius),
+                                size: size(radius * 2., radius * 2.),
+                            },
+                            color,
+                        )
+                        .corner_radii(radius),
+                    );
                 }
 
-                if let Ok(path) = builder.build() {
-                    window.paint_path(path, color);
+                for (start, end) in legs {
+                    if start == end {
+                        continue;
+                    }
+                    let width = if start.x == end.x {
+                        geometry::LINE_WIDTH
+                    } else {
+                        geometry::DIAGONAL_LINE_WIDTH
+                    };
+                    let mut builder = PathBuilder::stroke(width);
+                    builder.move_to(start);
+                    builder.line_to(end);
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, color);
+                    }
                 }
             }
 
@@ -358,7 +384,8 @@ mod tests {
             lane: Lane(lane),
             color: LaneColor(color),
             segments,
-            has_incoming: false,
+            incoming: Vec::new(),
+            next_lane: None,
         }
     }
 

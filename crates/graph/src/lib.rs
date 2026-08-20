@@ -12,4 +12,4 @@ pub mod layout;
 pub mod model;
 
 pub use layout::layout;
-pub use model::{GraphLayout, GraphRow, Lane, LaneColor, PALETTE_SIZE, Segment};
+pub use model::{GraphLayout, GraphRow, IncomingLink, Lane, LaneColor, PALETTE_SIZE, Segment};

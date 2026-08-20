@@ -37,6 +37,16 @@ impl Segment {
     }
 }
 
+/// A line arriving at a commit's node from the row above.
+///
+/// `from` is the lane it occupied up there, which is what lets the renderer continue the
+/// line at the same slope rather than restarting it vertically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IncomingLink {
+    pub from: Lane,
+    pub color: LaneColor,
+}
+
 /// One commit's placement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphRow {
@@ -46,13 +56,17 @@ pub struct GraphRow {
     /// Colour of the node itself, which is the colour of the lane it continues.
     pub color: LaneColor,
     pub segments: Vec<Segment>,
-    /// Whether some child above already occupied this commit's lane.
+    /// The lines the row above sends into this commit's node, empty on a branch tip.
     ///
-    /// False for a branch tip, which nothing points at from above. A renderer needs this to
-    /// know whether to draw the half-height stub from the top of the band down into the
-    /// node: without it, a tip grows a line above it that leads nowhere, and the row below
-    /// a commit that has none cannot tell the difference.
-    pub has_incoming: bool,
+    /// A tip is pointed at by nothing, so a renderer that drew a stub unconditionally
+    /// would grow a line above it leading nowhere.
+    pub incoming: Vec<IncomingLink>,
+    /// The lane of the row below, absent on the last row of the walk.
+    ///
+    /// A link to a parent one row down is drawn as a single straight line between two
+    /// nodes, and a row band can only paint its own half of it. Both halves have to agree
+    /// on where they meet, so each needs to know the other's lane.
+    pub next_lane: Option<Lane>,
 }
 
 impl GraphRow {
@@ -63,6 +77,18 @@ impl GraphRow {
     /// link starts at the node's centre, half a band below where a crossing line enters.
     pub fn is_outgoing(&self, segment: &Segment) -> bool {
         segment.from == self.lane
+    }
+
+    /// Whether `segment` lands on the node of the row immediately below.
+    ///
+    /// Only such a segment bends at the band edge; one merely reserving a lane for a
+    /// commit further down stays in that lane and meets a vertical there.
+    pub fn lands_on_next_node(&self, segment: &Segment) -> bool {
+        self.next_lane == Some(segment.to)
+    }
+
+    pub fn has_incoming(&self) -> bool {
+        !self.incoming.is_empty()
     }
 }
 
