@@ -158,6 +158,13 @@ it. Verify any change here by running GitX's algorithm over a real history and d
 column of every commit — ten of this repository's 53 were off by one before the port, and
 patching rather than porting took it to eighteen.
 
+**A graph line bends nowhere.** `PBGitRevisionCell.drawLineFromColumn` draws one straight
+line from a cell edge to that cell's own centre, so a change of column happens over half a
+row and every line ends *on* a node. `GraphRow` is split to match — `incoming` for the
+upper half, `segments` for the lower — and correct columns are not enough on their own: a
+segment spanning the whole band between two rows draws the right topology with every
+divergence starting a half-row below the node it comes from.
+
 **Network and mutating Git operations go through subprocess `git`, never a library.**
 libssh2 does not read `~/.ssh/config`, so `Host` aliases and `ProxyCommand` silently break.
 The subprocess must inherit a `PATH` resolved from the user's login shell — a macOS GUI
