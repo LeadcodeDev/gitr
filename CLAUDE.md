@@ -42,6 +42,15 @@ reference matches exactly. A `rev` here produces two copies of the crate in the 
 and traits from one do not apply to the other. The failure looks unrelated — *"no method
 named `bg` found for struct `Root`"*. `Cargo.lock` is what pins the revisions.
 
+**Because `Cargo.lock` is the only pin, every install command needs `--locked`.**
+`cargo install` ignores a lock file by default, re-resolves `gpui` and `gpui-component`
+against zed's moving default branch, and fails on whatever changed upstream since the
+lock was written — the last time, a `register_panel` closure that grew from three
+parameters to five. The build is green in a checkout and broken for anyone installing,
+which is the worst shape a break can take: `cargo build` here will never reproduce it.
+`cargo install --locked --git …` is the command; the README, `CLAUDE.md` and the release
+notes in `.github/workflows/release.yaml` must all carry the flag.
+
 **The gpui-component website documentation is out of date in places.** Verified wrong at
 the time of writing: `h_resizable(id, state)` is really `h_resizable(id).with_state(&state)`;
 `Root::render_dialog_layer(cx)` really takes `(window, cx)`; `Root::new(...).bg(...)` does not
@@ -134,8 +143,8 @@ not a git command`.
 
 The same limitation reaches *installing* gitr, because cargo fetches through its own
 bundled libgit2 too. It does not bite today — this repository is public, so
-`cargo install --git https://github.com/ferrislabs/gitr` fetches anonymously with no
-credentials and no flags, verified with `GIT_CONFIG_GLOBAL=/dev/null`. It would return the
+`cargo install --locked --git https://github.com/ferrislabs/gitr` fetches anonymously with
+no credentials, verified with `GIT_CONFIG_GLOBAL=/dev/null`. It would return the
 moment the repository went private again: HTTPS then fails for want of a credential
 helper, SSH fails with `no authentication methods succeeded` because libgit2 reads neither
 `~/.ssh/config` nor the agent, and only `--config net.git-fetch-with-cli=true` — which
