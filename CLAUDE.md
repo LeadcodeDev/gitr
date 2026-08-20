@@ -78,10 +78,19 @@ hand-drawn crabs were tried and each one read as a face. One pixel departs from 
 original — the whites of the eyes are transparent there, sitting on GitHub's white plate,
 and must be set explicitly here because this plate is black.
 
+**A macOS icon does not fill its canvas, and one that does looks the wrong size.** Measured
+on Mail, Messages, Music and Slack, each puts its artwork on 824 of 1024 pixels — 80.5% —
+and leaves the rest transparent. The dock lays out the canvas, not the artwork, so painting
+edge to edge puts the icon on a different grid from every neighbour. gitr ships 814px inset
+by 105 on a 1024 canvas; exactly 824 would need a fractional scale per grid unit, which
+destroys the pixel edges the mark is made of. The grid is 22 units so the plate's corner
+radius can land at 22.7% against Apple's 22.5% — on 11 units the only options were 18% and
+27%, both visibly wrong beside a system icon.
+
 The generator uses the standard library only, encoding the PNG through `zlib` and `struct`.
 It previously shelled out to `rsvg-convert`, which meant nobody could regenerate the icon
-without a Homebrew package. Flat colour also compresses: the 1056px render is 11 KB, where
-the gradient-and-grain version it replaced needed 231 KB at half the resolution.
+without a Homebrew package. Flat colour also compresses: the render is 11 KB, where the
+gradient-and-grain version it replaced needed 231 KB at half the resolution.
 
 **`TitleBar::window_options()`, not `WindowOptions::default()`.** The title bar draws its own
 chrome and needs the OS one transparent and drag-owned by the app.
