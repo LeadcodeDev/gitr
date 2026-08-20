@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use domain::{CommitSummary, ObjectId};
 
-use crate::model::{GraphLayout, GraphRow, Lane, LaneColor, PALETTE_SIZE, Segment};
+use crate::model::{GraphLayout, GraphRow, IncomingLink, Lane, LaneColor, PALETTE_SIZE, Segment};
 
 /// A column's current reservation: the commit it expects next, and the colour that column
 /// has carried since the track using it was opened.
@@ -93,12 +93,34 @@ pub fn layout(commits: &[CommitSummary]) -> GraphLayout {
 
         width = width.max(tracks.len() as u16).max(next_tracks.len() as u16);
 
+        let lane = Lane(lane_index as u16);
+        let incoming = if was_reserved {
+            rows.last().map_or_else(Vec::new, |previous: &GraphRow| {
+                previous
+                    .segments
+                    .iter()
+                    .filter(|segment| segment.to == lane)
+                    .map(|segment| IncomingLink {
+                        from: segment.from,
+                        color: segment.color,
+                    })
+                    .collect()
+            })
+        } else {
+            Vec::new()
+        };
+
+        if let Some(previous) = rows.last_mut() {
+            previous.next_lane = Some(lane);
+        }
+
         rows.push(GraphRow {
             commit: commit.id,
-            lane: Lane(lane_index as u16),
+            lane,
             color: commit_color,
             segments,
-            has_incoming: was_reserved,
+            incoming,
+            next_lane: None,
         });
 
         tracks = next_tracks;

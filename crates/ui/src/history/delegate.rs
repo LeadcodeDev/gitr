@@ -246,14 +246,14 @@ fn graph_cell(row: GraphRow, theme: &ThemeColor) -> AnyElement {
                 );
                 let color = lane_color(segment.color, &theme);
 
-                let mut builder = PathBuilder::stroke(geometry::LINE_WIDTH);
-                builder.move_to(top);
-                if segment.is_vertical {
-                    builder.line_to(bottom);
+                let width = if segment.is_vertical {
+                    geometry::LINE_WIDTH
                 } else {
-                    let mid_y = (top.y + bottom.y) * 0.5;
-                    builder.cubic_bezier_to(bottom, point(top.x, mid_y), point(bottom.x, mid_y));
-                }
+                    geometry::DIAGONAL_LINE_WIDTH
+                };
+                let mut builder = PathBuilder::stroke(width);
+                builder.move_to(top);
+                builder.line_to(bottom);
 
                 if let Ok(path) = builder.build() {
                     window.paint_path(path, color);
@@ -358,7 +358,8 @@ mod tests {
             lane: Lane(lane),
             color: LaneColor(color),
             segments,
-            has_incoming: false,
+            incoming: Vec::new(),
+            next_lane: None,
         }
     }
 

@@ -275,11 +275,11 @@ fn a_tip_has_nothing_incoming_while_everything_it_reaches_does() {
     let layout = layout(&commits);
 
     assert!(
-        !layout.rows[0].has_incoming,
+        !layout.rows[0].has_incoming(),
         "the newest commit has no child above it"
     );
-    assert!(layout.rows[1].has_incoming);
-    assert!(layout.rows[2].has_incoming);
+    assert!(layout.rows[1].has_incoming());
+    assert!(layout.rows[2].has_incoming());
 }
 
 #[test]
@@ -292,13 +292,13 @@ fn each_branch_tip_starts_its_own_track_with_nothing_above_it() {
 
     let layout = layout(&commits);
 
-    assert!(!layout.rows[0].has_incoming);
+    assert!(!layout.rows[0].has_incoming());
     assert!(
-        !layout.rows[1].has_incoming,
+        !layout.rows[1].has_incoming(),
         "a second tip opens a fresh lane, so nothing reaches it from above either"
     );
     assert!(
-        layout.rows[2].has_incoming,
+        layout.rows[2].has_incoming(),
         "both tips point at the root, so a line does reach it"
     );
 }
@@ -313,5 +313,5 @@ fn a_root_commit_emits_no_segment_of_its_own() {
         layout.rows[0].segments.is_empty(),
         "nothing continues below a root, so its band draws nothing downward"
     );
-    assert!(!layout.rows[0].has_incoming);
+    assert!(!layout.rows[0].has_incoming());
 }
