@@ -1,7 +1,7 @@
 use domain::BranchName;
-use gpui::WeakEntity;
+use gpui::{ParentElement as _, SharedString, Styled as _, WeakEntity};
 use gpui_component::{
-    IconName,
+    Icon, IconName, h_flex,
     menu::{PopupMenu, PopupMenuItem},
 };
 
@@ -42,21 +42,28 @@ fn delete_menu_item(
     switch_to: Option<&BranchName>,
     workspace: &WeakEntity<Workspace>,
 ) -> PopupMenuItem {
-    let label = match switch_to {
-        Some(fallback) => format!("Delete branch and switch to {fallback}"),
-        None => "Delete branch".to_string(),
+    let label: SharedString = match switch_to {
+        Some(fallback) => format!("Delete branch and switch to {fallback}").into(),
+        None => "Delete branch".into(),
     };
     let workspace = workspace.clone();
     let branch = branch.clone();
 
-    PopupMenuItem::new(label)
-        .icon(IconName::Delete)
-        .on_click(move |_, window, cx| {
-            let _ = workspace.update(cx, |workspace, cx| {
-                workspace.delete_local_branch(branch.clone(), window, cx);
-            });
-        })
+    PopupMenuItem::element(move |_, _| {
+        h_flex()
+            .items_center()
+            .gap_2()
+            .child(Icon::new(IconName::Delete).size(ICON_SIZE))
+            .child(label.clone())
+    })
+    .on_click(move |_, window, cx| {
+        let _ = workspace.update(cx, |workspace, cx| {
+            workspace.delete_local_branch(branch.clone(), window, cx);
+        });
+    })
 }
+
+const ICON_SIZE: gpui::Pixels = gpui::px(16.);
 
 #[cfg(test)]
 mod tests {

@@ -1480,7 +1480,6 @@ fn title_bar(
                 .child(
                     Button::new("toggle-sidebar")
                         .ghost()
-                        .small()
                         .icon(if sidebar_collapsed {
                             IconName::PanelLeftOpen
                         } else {
@@ -1501,7 +1500,6 @@ fn title_bar(
                 .child(
                     Button::new("toggle-detail")
                         .ghost()
-                        .small()
                         .icon(if detail_visible {
                             IconName::PanelRightClose
                         } else {
@@ -1538,7 +1536,6 @@ fn theme_preference_control(
 
     Button::new("theme-preference")
         .ghost()
-        .small()
         .icon(preference.icon())
         .tooltip(format!("Theme: {}", preference.label()))
         .dropdown_menu(move |menu, _, _| {
