@@ -1,6 +1,9 @@
 use domain::BranchName;
 use gpui::WeakEntity;
-use gpui_component::menu::PopupMenuItem;
+use gpui_component::{
+    IconName,
+    menu::{PopupMenu, PopupMenuItem},
+};
 
 use crate::workspace::Workspace;
 
@@ -22,7 +25,19 @@ impl Deletion {
     }
 }
 
-pub fn delete_menu_item(
+pub fn branch_menu(
+    menu: PopupMenu,
+    branch: &BranchName,
+    switch_to: Option<&BranchName>,
+    workspace: &WeakEntity<Workspace>,
+) -> PopupMenu {
+    menu.label(MENU_TITLE)
+        .item(delete_menu_item(branch, switch_to, workspace))
+}
+
+const MENU_TITLE: &str = "Actions";
+
+fn delete_menu_item(
     branch: &BranchName,
     switch_to: Option<&BranchName>,
     workspace: &WeakEntity<Workspace>,
@@ -34,11 +49,13 @@ pub fn delete_menu_item(
     let workspace = workspace.clone();
     let branch = branch.clone();
 
-    PopupMenuItem::new(label).on_click(move |_, window, cx| {
-        let _ = workspace.update(cx, |workspace, cx| {
-            workspace.delete_local_branch(branch.clone(), window, cx);
-        });
-    })
+    PopupMenuItem::new(label)
+        .icon(IconName::Delete)
+        .on_click(move |_, window, cx| {
+            let _ = workspace.update(cx, |workspace, cx| {
+                workspace.delete_local_branch(branch.clone(), window, cx);
+            });
+        })
 }
 
 #[cfg(test)]

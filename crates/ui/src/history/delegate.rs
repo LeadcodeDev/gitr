@@ -21,7 +21,7 @@ use gpui_component::{
 };
 use graph::GraphRow;
 
-use crate::branch_actions::{Deletion, delete_menu_item};
+use crate::branch_actions::{Deletion, branch_menu};
 use crate::graph_palette::lane_color;
 use crate::repository::model::{History, HistoryFilter, LoadState};
 use crate::workspace::Workspace;
@@ -342,7 +342,7 @@ fn subject_cell(
                     .id(("branch-badge", index))
                     .child(badge)
                     .context_menu(move |menu, _, _| {
-                        menu.item(delete_menu_item(&branch, switch_to.as_ref(), &workspace))
+                        branch_menu(menu, &branch, switch_to.as_ref(), &workspace)
                     })
                     .into_any_element(),
                 None => badge.into_any_element(),

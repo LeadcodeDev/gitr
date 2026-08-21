@@ -17,7 +17,7 @@ use gpui::{Context, WeakEntity};
 use gpui_component::{IconName, sidebar::Sidebar};
 
 use crate::{
-    branch_actions::{Deletion, delete_menu_item},
+    branch_actions::{Deletion, branch_menu},
     project::ProjectList,
     repository::{LoadState, ReferenceIndex},
     workspace::Workspace,
@@ -93,7 +93,7 @@ fn tree_item(
         let branch = branch.clone();
         let workspace = workspace.clone();
         item = item.context_menu(move |menu, _, _| {
-            menu.item(delete_menu_item(&branch, switch_to.as_ref(), &workspace))
+            branch_menu(menu, &branch, switch_to.as_ref(), &workspace)
         });
     }
 
