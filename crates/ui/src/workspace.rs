@@ -40,9 +40,10 @@ use std::time::{Duration, SystemTime};
 use domain::{Aspect, BranchName, HeadState, HistoryScope, ObjectId, Reference, RepositoryChange};
 use gpui::{
     Action, Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, Axis, Context,
-    Entity, Hsla, InteractiveElement as _, IntoElement, Menu, MenuItem, MouseButton, OsAction,
-    ParentElement as _, PathPromptOptions, Render, ScrollHandle, SharedString, Styled as _,
-    Subscription, Task, WeakEntity, Window, div, ease_in_out, prelude::FluentBuilder as _, px,
+    Entity, Focusable as _, Hsla, InteractiveElement as _, IntoElement, Menu, MenuItem,
+    MouseButton, OsAction, ParentElement as _, PathPromptOptions, Render, ScrollHandle,
+    SharedString, Styled as _, Subscription, Task, WeakEntity, Window, div, ease_in_out,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Root, Theme, ThemeMode, TitleBar, WindowExt as _,
@@ -321,7 +322,7 @@ impl Workspace {
         })
         .detach();
 
-        let workspace = Self {
+        let mut workspace = Self {
             dock_area,
             projects,
             repository,
@@ -348,6 +349,9 @@ impl Workspace {
             _project_search_subscription: project_search_subscription,
             _project_url_subscription: project_url_subscription,
         };
+        if workspace.repository.read(cx).selected().is_none() {
+            workspace.hide_detail(window, cx);
+        }
         workspace.refresh_application_menus(cx);
         workspace
     }
@@ -655,6 +659,9 @@ impl Workspace {
                 let detail = repository.read(cx).detail().clone();
                 self.detail_panel
                     .update(cx, |panel, cx| panel.set_detail(detail, cx));
+                if repository.read(cx).selected().is_none() {
+                    self.dismiss_detail(window, cx);
+                }
             }
             RepositoryEvent::Failed(message) => {
                 window.push_notification((NotificationType::Error, message.to_string()), cx);
@@ -673,6 +680,7 @@ impl Workspace {
             HistoryPanelEvent::Selected(id) => {
                 self.repository
                     .update(cx, |repository, cx| repository.select(Some(*id), cx));
+                self.reveal_detail(window, cx);
             }
             HistoryPanelEvent::DoubleClicked(id) => {
                 self.repository
@@ -716,6 +724,7 @@ impl Workspace {
         });
 
         self.detail_slot = Some(detail_tab_panel);
+        self.history_panel.focus_handle(cx).focus(window, cx);
     }
 
     /// Detaches the detail panel from the centre split, giving its width back to the

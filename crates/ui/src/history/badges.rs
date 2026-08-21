@@ -13,6 +13,18 @@ use domain::{BranchName, Reference};
 /// close to failing, which is why the hue is pushed this far from red.
 const CURRENT_BRANCH: u32 = 0xe8622a;
 
+/// A tag's own yellow, in place of `theme.yellow`.
+///
+/// That token resolves to `#ca8a04` under the light theme — an amber dark enough to read
+/// as brown beside the orange above, which is what made a tag hard to tell from the
+/// checked-out branch. This is lighter and five degrees further round the wheel, which is
+/// as far toward a pure yellow as the badge can go: the plate is the colour at 16% and the
+/// text is the colour at full strength, so on a light background a truly yellow yellow
+/// stops being legible long before it stops being yellow. Measured against the plate it
+/// composites onto, the contrast is 2.0 in light mode and 5.1 in dark, against 2.7 for the
+/// orange it has to be told apart from.
+const TAG: u32 = 0xc9a227;
+
 const BADGE_RADIUS: f32 = 4.;
 
 /// Which of the four badge colours a reference gets.
@@ -43,7 +55,7 @@ pub fn badge_color(kind: BadgeKind, theme: &ThemeColor) -> Hsla {
         BadgeKind::CurrentBranch => rgb(CURRENT_BRANCH).into(),
         BadgeKind::LocalBranch => theme.green,
         BadgeKind::RemoteBranch => theme.blue,
-        BadgeKind::Tag => theme.yellow,
+        BadgeKind::Tag => rgb(TAG).into(),
     }
 }
 
