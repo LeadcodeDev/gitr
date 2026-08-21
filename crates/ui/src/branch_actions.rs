@@ -5,6 +5,7 @@ use gpui_component::{
     menu::{PopupMenu, PopupMenuItem},
 };
 
+use crate::density::MENU_ICON_SIZE;
 use crate::workspace::Workspace;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -53,7 +54,7 @@ fn delete_menu_item(
         h_flex()
             .items_center()
             .gap_2()
-            .child(Icon::new(IconName::Delete).size(ICON_SIZE))
+            .child(Icon::new(IconName::Delete).size(MENU_ICON_SIZE))
             .child(label.clone())
     })
     .on_click(move |_, window, cx| {
@@ -62,8 +63,6 @@ fn delete_menu_item(
         });
     })
 }
-
-const ICON_SIZE: gpui::Pixels = gpui::px(16.);
 
 #[cfg(test)]
 mod tests {

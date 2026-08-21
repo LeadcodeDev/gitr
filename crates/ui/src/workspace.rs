@@ -41,11 +41,11 @@ use domain::{Aspect, BranchName, HeadState, HistoryScope, ObjectId, Reference, R
 use gpui::{
     Action, Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, Axis, Context,
     Entity, Hsla, InteractiveElement as _, IntoElement, Menu, MenuItem, OsAction,
-    ParentElement as _, PathPromptOptions, Render, ScrollHandle, Styled as _, Subscription, Task,
-    WeakEntity, Window, div, ease_in_out, px,
+    ParentElement as _, PathPromptOptions, Render, ScrollHandle, SharedString, Styled as _,
+    Subscription, Task, WeakEntity, Window, div, ease_in_out, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IconName, Root, Theme, ThemeMode, TitleBar, WindowExt as _,
+    ActiveTheme as _, Icon, IconName, Root, Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dock::{DockArea, DockAreaState, DockEvent, DockItem, Panel, StackPanel, TabPanel},
     h_flex,
@@ -56,6 +56,7 @@ use gpui_component::{
 };
 use vcs::process::{CloneProgress, GitRunner};
 
+use crate::density::MENU_ICON_SIZE;
 use crate::{
     actions::{
         About, MinimizeWindow, OpenFromDisk, Quit, SynchroniseActiveProject, ToggleDetailPanel,
@@ -1551,17 +1552,28 @@ fn theme_preference_menu_item(
     current: ThemePreference,
 ) -> PopupMenuItem {
     let workspace = workspace.clone();
-    PopupMenuItem::new(option.label())
-        .icon(option.icon())
-        .checked(option == current)
-        .on_click(move |_, window, cx| {
-            let Some(workspace) = workspace.upgrade() else {
-                return;
-            };
-            workspace.update(cx, |workspace, cx| {
-                workspace.set_theme_preference(option, window, cx);
-            });
-        })
+    let label: SharedString = option.label().into();
+    let is_current = option == current;
+
+    PopupMenuItem::element(move |_, _| {
+        h_flex()
+            .flex_1()
+            .items_center()
+            .gap_2()
+            .child(Icon::new(option.icon()).size(MENU_ICON_SIZE))
+            .child(div().flex_1().child(label.clone()))
+            .when(is_current, |this| {
+                this.child(Icon::new(IconName::Check).size(MENU_ICON_SIZE))
+            })
+    })
+    .on_click(move |_, window, cx| {
+        let Some(workspace) = workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_theme_preference(option, window, cx);
+        });
+    })
 }
 
 /// The whole native macOS menu bar, rebuilt from scratch on every call — see
