@@ -40,7 +40,7 @@ use std::time::{Duration, SystemTime};
 use domain::{Aspect, BranchName, HeadState, HistoryScope, ObjectId, Reference, RepositoryChange};
 use gpui::{
     Action, Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, Axis, Context,
-    Entity, Hsla, InteractiveElement as _, IntoElement, Menu, MenuItem, OsAction,
+    Entity, Hsla, InteractiveElement as _, IntoElement, Menu, MenuItem, MouseButton, OsAction,
     ParentElement as _, PathPromptOptions, Render, ScrollHandle, SharedString, Styled as _,
     Subscription, Task, WeakEntity, Window, div, ease_in_out, prelude::FluentBuilder as _, px,
 };
@@ -737,6 +737,14 @@ impl Workspace {
         content_split.update(cx, |split, cx| {
             split.remove_panel(Arc::new(slot), window, cx);
         });
+    }
+
+    fn dismiss_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.detail_slot.is_none() {
+            return;
+        }
+        self.hide_detail(window, cx);
+        cx.notify();
     }
 
     fn toggle_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1735,6 +1743,12 @@ impl Render for Workspace {
                     .min_h_0()
                     .flex()
                     .flex_row()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|workspace, _, window, cx| {
+                            workspace.dismiss_detail(window, cx);
+                        }),
+                    )
                     .child(sidebar::render(
                         &references,
                         &head,
@@ -1743,9 +1757,24 @@ impl Render for Workspace {
                         sidebar_collapsed,
                         cx,
                     ))
-                    .child(div().flex_1().min_w_0().child(dock_area)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(dock_area),
+                    ),
             )
-            .child(status_bar(&history))
+            .child(
+                div()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|workspace, _, window, cx| {
+                            workspace.dismiss_detail(window, cx);
+                        }),
+                    )
+                    .child(status_bar(&history)),
+            )
             .children(self.theme_transition.as_ref().map(theme_transition_overlay))
             .children(sheet_layer)
             .children(dialog_layer)
