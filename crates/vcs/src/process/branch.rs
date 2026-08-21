@@ -6,8 +6,6 @@ use super::runner::{GitProcessError, GitRunner};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BranchError {
-    #[error("it has commits that are in no other branch")]
-    NotMerged,
     #[error("cannot leave the current branch for {target}: {stderr}")]
     SwitchRefused { target: String, stderr: String },
     #[error("git exited with status {status}: {stderr}")]
@@ -22,7 +20,6 @@ impl GitRunner {
         repository: &Path,
         branch: &BranchName,
         switch_to: Option<&BranchName>,
-        integration: Option<&BranchName>,
     ) -> Result<(), BranchError> {
         if let Some(target) = switch_to {
             self.run(repository, &["checkout", target.as_str()])
@@ -35,105 +32,8 @@ impl GitRunner {
                 })?;
         }
 
-        match self.run(repository, &["branch", "-d", branch.as_str()]) {
-            Ok(_) => Ok(()),
-            Err(error) => match classify(error) {
-                BranchError::NotMerged => self.delete_if_absorbed(
-                    repository,
-                    branch,
-                    integration.ok_or(BranchError::NotMerged)?,
-                ),
-                other => Err(other),
-            },
-        }
-    }
-
-    fn delete_if_absorbed(
-        &self,
-        repository: &Path,
-        branch: &BranchName,
-        integration: &BranchName,
-    ) -> Result<(), BranchError> {
-        if !self.is_absorbed_by(repository, branch, integration)? {
-            return Err(BranchError::NotMerged);
-        }
         self.run(repository, &["branch", "-D", branch.as_str()])
             .map(|_| ())
-            .map_err(classify)
-    }
-
-    pub fn is_absorbed_by(
-        &self,
-        repository: &Path,
-        branch: &BranchName,
-        integration: &BranchName,
-    ) -> Result<bool, BranchError> {
-        if branch == integration {
-            return Ok(false);
-        }
-        Ok(
-            self.merging_would_change_nothing(repository, branch, integration)
-                || self.whole_diff_already_applied(repository, branch, integration),
-        )
-    }
-
-    fn merging_would_change_nothing(
-        &self,
-        repository: &Path,
-        branch: &BranchName,
-        integration: &BranchName,
-    ) -> bool {
-        let Ok(integration_tree) = self.capture(
-            repository,
-            &["rev-parse", &format!("{integration}^{{tree}}")],
-        ) else {
-            return false;
-        };
-        let Ok(merged) = self.run(
-            repository,
-            &[
-                "merge-tree",
-                "--write-tree",
-                integration.as_str(),
-                branch.as_str(),
-            ],
-        ) else {
-            return false;
-        };
-
-        merged.stdout.trim() == integration_tree
-    }
-
-    fn whole_diff_already_applied(
-        &self,
-        repository: &Path,
-        branch: &BranchName,
-        integration: &BranchName,
-    ) -> bool {
-        let probe = || -> Result<String, BranchError> {
-            let base = self.capture(
-                repository,
-                &["merge-base", integration.as_str(), branch.as_str()],
-            )?;
-            let tree = self.capture(repository, &["rev-parse", &format!("{branch}^{{tree}}")])?;
-            let replay = self.capture(
-                repository,
-                &["commit-tree", &tree, "-p", &base, "-m", "gitr probe"],
-            )?;
-            self.capture(repository, &["cherry", integration.as_str(), &replay])
-        };
-
-        match probe() {
-            Ok(cherry) => {
-                !cherry.trim().is_empty() && cherry.lines().all(|line| line.starts_with('-'))
-            }
-            Err(_) => false,
-        }
-    }
-
-    fn capture(&self, repository: &Path, args: &[&str]) -> Result<String, BranchError> {
-        self.run(repository, args)
-            .map(|output| output.stdout.trim().to_string())
             .map_err(classify)
     }
 }
@@ -141,16 +41,10 @@ impl GitRunner {
 fn classify(error: GitProcessError) -> BranchError {
     match error {
         GitProcessError::Spawn(source) => BranchError::Unavailable(source.to_string()),
-        GitProcessError::Failed { status, stderr } => {
-            if stderr.to_lowercase().contains("not fully merged") {
-                BranchError::NotMerged
-            } else {
-                BranchError::Failed {
-                    status,
-                    stderr: summarise(&stderr),
-                }
-            }
-        }
+        GitProcessError::Failed { status, stderr } => BranchError::Failed {
+            status,
+            stderr: summarise(&stderr),
+        },
     }
 }
 
