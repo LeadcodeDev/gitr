@@ -45,7 +45,7 @@ use gpui::{
     WeakEntity, Window, div, ease_in_out, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IconName, Root, Sizable as _, Theme, ThemeMode, TitleBar, WindowExt as _,
+    ActiveTheme as _, IconName, Root, Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dock::{DockArea, DockAreaState, DockEvent, DockItem, Panel, StackPanel, TabPanel},
     h_flex,
