@@ -38,7 +38,7 @@ impl GitRunner {
         match self.run(repository, &["branch", "-d", branch.as_str()]) {
             Ok(_) => Ok(()),
             Err(error) => match classify(error) {
-                BranchError::NotMerged => self.delete_if_squash_merged(
+                BranchError::NotMerged => self.delete_if_absorbed(
                     repository,
                     branch,
                     integration.ok_or(BranchError::NotMerged)?,
@@ -48,13 +48,13 @@ impl GitRunner {
         }
     }
 
-    fn delete_if_squash_merged(
+    fn delete_if_absorbed(
         &self,
         repository: &Path,
         branch: &BranchName,
         integration: &BranchName,
     ) -> Result<(), BranchError> {
-        if !self.is_squash_merged(repository, branch, integration)? {
+        if !self.is_absorbed_by(repository, branch, integration)? {
             return Err(BranchError::NotMerged);
         }
         self.run(repository, &["branch", "-D", branch.as_str()])
@@ -62,7 +62,7 @@ impl GitRunner {
             .map_err(classify)
     }
 
-    pub fn is_squash_merged(
+    pub fn is_absorbed_by(
         &self,
         repository: &Path,
         branch: &BranchName,
@@ -71,30 +71,64 @@ impl GitRunner {
         if branch == integration {
             return Ok(false);
         }
-        let base = self.capture(
-            repository,
-            &["merge-base", integration.as_str(), branch.as_str()],
-        )?;
-        let tree = self.capture(repository, &["rev-parse", &format!("{branch}^{{tree}}")])?;
-        let base_tree = self.capture(repository, &["rev-parse", &format!("{base}^{{tree}}")])?;
-        if tree == base_tree {
-            return Ok(true);
-        }
+        Ok(
+            self.merging_would_change_nothing(repository, branch, integration)
+                || self.whole_diff_already_applied(repository, branch, integration),
+        )
+    }
 
-        let replay = self.capture(
+    fn merging_would_change_nothing(
+        &self,
+        repository: &Path,
+        branch: &BranchName,
+        integration: &BranchName,
+    ) -> bool {
+        let Ok(integration_tree) = self.capture(
+            repository,
+            &["rev-parse", &format!("{integration}^{{tree}}")],
+        ) else {
+            return false;
+        };
+        let Ok(merged) = self.run(
             repository,
             &[
-                "commit-tree",
-                &tree,
-                "-p",
-                &base,
-                "-m",
-                "gitr squash-merge probe",
+                "merge-tree",
+                "--write-tree",
+                integration.as_str(),
+                branch.as_str(),
             ],
-        )?;
-        let cherry = self.capture(repository, &["cherry", integration.as_str(), &replay])?;
+        ) else {
+            return false;
+        };
 
-        Ok(cherry.lines().all(|line| line.starts_with('-')) && !cherry.trim().is_empty())
+        merged.stdout.trim() == integration_tree
+    }
+
+    fn whole_diff_already_applied(
+        &self,
+        repository: &Path,
+        branch: &BranchName,
+        integration: &BranchName,
+    ) -> bool {
+        let probe = || -> Result<String, BranchError> {
+            let base = self.capture(
+                repository,
+                &["merge-base", integration.as_str(), branch.as_str()],
+            )?;
+            let tree = self.capture(repository, &["rev-parse", &format!("{branch}^{{tree}}")])?;
+            let replay = self.capture(
+                repository,
+                &["commit-tree", &tree, "-p", &base, "-m", "gitr probe"],
+            )?;
+            self.capture(repository, &["cherry", integration.as_str(), &replay])
+        };
+
+        match probe() {
+            Ok(cherry) => {
+                !cherry.trim().is_empty() && cherry.lines().all(|line| line.starts_with('-'))
+            }
+            Err(_) => false,
+        }
     }
 
     fn capture(&self, repository: &Path, args: &[&str]) -> Result<String, BranchError> {

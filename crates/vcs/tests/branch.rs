@@ -195,7 +195,7 @@ fn a_squash_merged_branch_is_deleted_even_though_its_commits_are_not_ancestors()
 }
 
 #[test]
-fn a_branch_with_work_of_its_own_survives_the_squash_check() {
+fn a_branch_with_work_of_its_own_is_refused() {
     let repository = init_repository();
     git(repository.path(), &["checkout", "-q", "-b", "feature"]);
     write(repository.path(), "a.txt", "one\n");
@@ -220,7 +220,7 @@ fn a_branch_with_work_of_its_own_survives_the_squash_check() {
 }
 
 #[test]
-fn without_an_integration_branch_the_squash_check_is_not_attempted() {
+fn without_an_integration_branch_the_content_check_is_not_attempted() {
     let repository = init_repository();
     git(repository.path(), &["checkout", "-q", "-b", "feature"]);
     write(repository.path(), "a.txt", "one\n");
@@ -235,7 +235,7 @@ fn without_an_integration_branch_the_squash_check_is_not_attempted() {
 }
 
 #[test]
-fn the_integration_branch_is_never_squash_merged_into_itself() {
+fn the_integration_branch_is_never_absorbed_into_itself() {
     let repository = init_repository();
     git(repository.path(), &["checkout", "-q", "-b", "side"]);
     git(repository.path(), &["checkout", "-q", "main"]);
@@ -254,4 +254,94 @@ fn the_integration_branch_is_never_squash_merged_into_itself() {
 
     assert!(matches!(&error, BranchError::NotMerged), "got {error:?}");
     assert!(local_branches(repository.path()).contains(&"main".to_string()));
+}
+
+#[test]
+fn a_branch_merged_as_several_squashes_is_still_recognised() {
+    let repository = init_repository();
+    git(repository.path(), &["checkout", "-q", "-b", "feature"]);
+    write(repository.path(), "a.txt", "one\n");
+    commit(repository.path(), "first landing");
+    squash_merge(repository.path(), "feature");
+
+    git(repository.path(), &["checkout", "-q", "feature"]);
+    write(repository.path(), "b.txt", "two\n");
+    commit(repository.path(), "second landing");
+    squash_merge(repository.path(), "feature");
+
+    GitRunner::new()
+        .delete_local_branch(
+            repository.path(),
+            &branch("feature"),
+            None,
+            Some(&branch("main")),
+        )
+        .expect(
+            "each half reached main under its own squash commit, so no single commit there \
+             carries the branch's combined patch — the branch is still fully absorbed",
+        );
+
+    assert_eq!(local_branches(repository.path()), vec!["main".to_string()]);
+}
+
+#[test]
+fn a_branch_whose_deletion_would_be_lost_is_refused() {
+    let repository = init_repository();
+    write(repository.path(), "shared.txt", "original\n");
+    commit(repository.path(), "add shared file");
+    git(repository.path(), &["checkout", "-q", "-b", "feature"]);
+    std::fs::remove_file(repository.path().join("shared.txt")).unwrap();
+    git(repository.path(), &["rm", "-q", "shared.txt"]);
+    commit(repository.path(), "remove the shared file");
+    git(repository.path(), &["checkout", "-q", "main"]);
+
+    let error = GitRunner::new()
+        .delete_local_branch(
+            repository.path(),
+            &branch("feature"),
+            None,
+            Some(&branch("main")),
+        )
+        .expect_err("merging it would change main, so it carries work main does not have");
+
+    assert!(matches!(&error, BranchError::NotMerged), "got {error:?}");
+    assert!(local_branches(repository.path()).contains(&"feature".to_string()));
+}
+
+#[test]
+fn a_branch_is_recognised_even_when_replaying_it_would_now_conflict() {
+    let repository = init_repository();
+    write(repository.path(), "notes.md", "first line\n");
+    commit(repository.path(), "add notes");
+    git(repository.path(), &["checkout", "-q", "-b", "feature"]);
+    write(
+        repository.path(),
+        "notes.md",
+        "first line\nfrom the branch\n",
+    );
+    commit(repository.path(), "extend the notes");
+    squash_merge(repository.path(), "feature");
+    write(
+        repository.path(),
+        "notes.md",
+        "first line\nrewritten on main afterwards\n",
+    );
+    commit(repository.path(), "main edits the same lines later");
+
+    assert!(
+        GitRunner::new()
+            .is_absorbed_by(repository.path(), &branch("feature"), &branch("main"),)
+            .unwrap(),
+        "the branch landed, then main rewrote the same lines, so replaying it three-way \
+         conflicts — its patch is still in main's history and nothing is lost by deleting it"
+    );
+
+    GitRunner::new()
+        .delete_local_branch(
+            repository.path(),
+            &branch("feature"),
+            None,
+            Some(&branch("main")),
+        )
+        .expect("and so the deletion goes through");
 }
