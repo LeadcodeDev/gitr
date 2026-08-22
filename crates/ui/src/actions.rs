@@ -32,5 +32,6 @@ actions!(
         UseSystemTheme,
         MinimizeWindow,
         ZoomWindow,
+        CloseWindow,
     ]
 );

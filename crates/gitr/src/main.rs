@@ -58,10 +58,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use domain::RepositoryError;
-use gpui::{App, AppContext, AsyncApp, QuitMode};
+use gpui::{App, AppContext, AsyncApp, KeyBinding, QuitMode};
 use gpui_component::{Root, TitleBar};
 use ui::Workspace;
-use ui::actions::Quit;
+use ui::actions::{CloseWindow, Quit};
 use ui::persistence;
 use ui::project::{Project, ProjectList, resolve_repository_root};
 
@@ -131,6 +131,7 @@ fn main() -> ExitCode {
             gpui_component::init(cx);
             ui::init(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.bind_keys([KeyBinding::new("cmd-w", CloseWindow, None)]);
             cx.set_quit_mode(QuitMode::LastWindowClosed);
             set_dock_icon();
 
