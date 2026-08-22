@@ -51,6 +51,7 @@
 
 mod instance;
 
+use std::collections::HashMap;
 use std::env;
 use std::io;
 use std::os::unix::process::CommandExt as _;
@@ -58,7 +59,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use domain::RepositoryError;
-use gpui::{App, AppContext, AsyncApp, KeyBinding, QuitMode};
+use gpui::{App, AppContext, AsyncApp, KeyBinding, QuitMode, WindowHandle};
 use gpui_component::{Root, TitleBar};
 use ui::Workspace;
 use ui::actions::{CloseWindow, Quit};
@@ -137,19 +138,27 @@ fn main() -> ExitCode {
 
             let projects = projects.clone();
             let requests = requests.clone();
+            let first_root = opened_root.clone();
             cx.spawn(async move |cx| {
-                open_window(projects, cx).expect("gitr cannot run without a window");
+                let mut windows: HashMap<PathBuf, WindowHandle<Root>> = HashMap::new();
+                let window = open_window(projects, cx).expect("gitr cannot run without a window");
+                if !first_root.as_os_str().is_empty() {
+                    windows.insert(first_root, window);
+                }
                 cx.update(|cx| cx.activate(true));
 
                 while let Ok(root) = requests.recv().await {
-                    if !root.as_os_str().is_empty() {
+                    if !root.as_os_str().is_empty() && !raise(&mut windows, &root, cx) {
                         let mut projects = project_list_at_startup();
-                        projects.add_or_activate(Project::local(root));
+                        projects.add_or_activate(Project::local(root.clone()));
                         if let Err(error) = persistence::save_project_list(&projects) {
                             eprintln!("gitr: failed to save project list: {error:#}");
                         }
-                        if open_window(projects, cx).is_err() {
-                            continue;
+                        match open_window(projects, cx) {
+                            Ok(window) => {
+                                windows.insert(root, window);
+                            }
+                            Err(_) => continue,
                         }
                     }
                     cx.update(|cx| cx.activate(true));
@@ -193,13 +202,36 @@ fn set_dock_icon() {
     unsafe { NSApplication::sharedApplication(main_thread).setApplicationIconImage(Some(&image)) };
 }
 
-fn open_window(projects: ProjectList, cx: &mut AsyncApp) -> anyhow::Result<()> {
-    cx.open_window(TitleBar::window_options(), |window, cx| {
+fn open_window(projects: ProjectList, cx: &mut AsyncApp) -> anyhow::Result<WindowHandle<Root>> {
+    let window = cx.open_window(TitleBar::window_options(), |window, cx| {
         let workspace = cx.new(|cx| Workspace::new(projects, window, cx));
         Workspace::register_menu_actions(&workspace, window, cx);
         cx.new(|cx| Root::new(workspace, window, cx))
     })?;
-    Ok(())
+    Ok(window)
+}
+
+/// Brings the window already showing `root` to the front, reporting whether there was one.
+///
+/// A handle whose window has since closed is dropped rather than trusted: the map is only
+/// ever read here, so an entry that has gone stale costs nothing until the same repository
+/// is asked for again, and that request repairs it. Watching for window closes to prune
+/// eagerly would buy one `HashMap` entry per repository opened in this process.
+fn raise(
+    windows: &mut HashMap<PathBuf, WindowHandle<Root>>,
+    root: &Path,
+    cx: &mut AsyncApp,
+) -> bool {
+    let Some(window) = windows.get(root) else {
+        return false;
+    };
+    let raised = window
+        .update(cx, |_, window, _| window.activate_window())
+        .is_ok();
+    if !raised {
+        windows.remove(root);
+    }
+    raised
 }
 
 /// Set on the process that opens the window, so it runs the event loop instead of
