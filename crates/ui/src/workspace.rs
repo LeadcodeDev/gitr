@@ -60,8 +60,8 @@ use vcs::process::{CloneProgress, GitRunner};
 use crate::density::MENU_ICON_SIZE;
 use crate::{
     actions::{
-        About, MinimizeWindow, OpenFromDisk, Quit, SynchroniseActiveProject, ToggleDetailPanel,
-        ToggleSidebar, UseDarkTheme, UseLightTheme, UseSystemTheme, ZoomWindow,
+        About, CloseWindow, MinimizeWindow, OpenFromDisk, Quit, SynchroniseActiveProject,
+        ToggleDetailPanel, ToggleSidebar, UseDarkTheme, UseLightTheme, UseSystemTheme, ZoomWindow,
     },
     branch_actions::Deletion,
     detail::DetailPanel,
@@ -463,6 +463,7 @@ impl Workspace {
         register_menu_action(cx, &workspace, window, Self::on_use_system_theme_action);
         register_menu_action(cx, &workspace, window, Self::on_minimize_window_action);
         register_menu_action(cx, &workspace, window, Self::on_zoom_window_action);
+        register_menu_action(cx, &workspace, window, Self::on_close_window_action);
     }
 
     /// There is no bundled `Info.plist` for the native About panel to read, and the
@@ -556,6 +557,15 @@ impl Workspace {
         _: &mut Context<Self>,
     ) {
         window.zoom_window();
+    }
+
+    fn on_close_window_action(
+        &mut self,
+        _: &CloseWindow,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.remove_window();
     }
 
     /// Scopes the history to `reference` and pushes it both to [`RepositoryState`], which
@@ -1644,6 +1654,8 @@ fn application_menus(theme_preference: ThemePreference) -> Vec<Menu> {
         Menu {
             name: "Window".into(),
             items: vec![
+                MenuItem::action("Close", CloseWindow),
+                MenuItem::separator(),
                 MenuItem::action("Minimize", MinimizeWindow),
                 MenuItem::action("Zoom", ZoomWindow),
             ],
@@ -1832,6 +1844,7 @@ mod tests {
             UseSystemTheme::name_for_type(),
             MinimizeWindow::name_for_type(),
             ZoomWindow::name_for_type(),
+            CloseWindow::name_for_type(),
             Cut::name_for_type(),
             Copy::name_for_type(),
             Paste::name_for_type(),
