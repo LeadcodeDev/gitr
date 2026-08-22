@@ -12,6 +12,7 @@
 //! where those two panels plug into the dock.
 
 pub mod actions;
+pub mod branch_actions;
 pub mod density;
 pub mod detail;
 pub mod graph_palette;

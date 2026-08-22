@@ -17,6 +17,7 @@ use gpui::{Context, WeakEntity};
 use gpui_component::{IconName, sidebar::Sidebar};
 
 use crate::{
+    branch_actions::{Deletion, branch_menu},
     project::ProjectList,
     repository::{LoadState, ReferenceIndex},
     workspace::Workspace,
@@ -39,10 +40,14 @@ pub(crate) fn render(
         .map(|branch| Reference::LocalBranch(branch.clone()));
     let index = references.ready();
     let workspace = cx.entity().downgrade();
+    let deletion = Deletion {
+        head: head.ready().and_then(HeadState::branch).cloned(),
+        fallback: index.and_then(ReferenceIndex::fallback_branch),
+    };
 
     let items = vec![
         working_item(),
-        branches_item(index, active_branch.as_ref(), &workspace),
+        branches_item(index, active_branch.as_ref(), &workspace, &deletion),
         remotes_item(index, active_branch.as_ref(), &workspace),
         tags_item(index, &workspace),
         stashes_item(),
@@ -62,6 +67,7 @@ fn tree_item(
     node: &branch_tree::RefTreeNode,
     active: Option<&Reference>,
     workspace: &WeakEntity<Workspace>,
+    deletion: Option<&Deletion>,
 ) -> SidebarTreeItem {
     let is_active = node
         .reference
@@ -80,11 +86,22 @@ fn tree_item(
         });
     }
 
+    if let (Some(Reference::LocalBranch(branch)), Some(deletion)) =
+        (node.reference.as_ref(), deletion)
+        && let Some(switch_to) = deletion.switch_to(branch)
+    {
+        let branch = branch.clone();
+        let workspace = workspace.clone();
+        item = item.context_menu(move |menu, _, _| {
+            branch_menu(menu, &branch, switch_to.as_ref(), &workspace)
+        });
+    }
+
     if !node.children.is_empty() {
         item = item.default_open(true).children(
             node.children
                 .iter()
-                .map(|child| tree_item(child, active, workspace)),
+                .map(|child| tree_item(child, active, workspace, deletion)),
         );
     }
 
@@ -95,6 +112,7 @@ fn branches_item(
     index: Option<&ReferenceIndex>,
     active: Option<&Reference>,
     workspace: &WeakEntity<Workspace>,
+    deletion: &Deletion,
 ) -> SidebarTreeItem {
     let references = index.into_iter().flat_map(|index| {
         index
@@ -106,9 +124,10 @@ fn branches_item(
     let mut item = SidebarTreeItem::new("Branches").icon(IconName::Network);
 
     if !tree.is_empty() {
-        item = item
-            .default_open(true)
-            .children(tree.iter().map(|node| tree_item(node, active, workspace)));
+        item = item.default_open(true).children(
+            tree.iter()
+                .map(|node| tree_item(node, active, workspace, Some(deletion))),
+        );
     }
 
     item
@@ -129,7 +148,10 @@ fn remotes_item(
     let mut item = SidebarTreeItem::new("Remotes").icon(IconName::Globe);
 
     if !tree.is_empty() {
-        item = item.children(tree.iter().map(|node| tree_item(node, active, workspace)));
+        item = item.children(
+            tree.iter()
+                .map(|node| tree_item(node, active, workspace, None)),
+        );
     }
 
     item
@@ -143,7 +165,10 @@ fn tags_item(index: Option<&ReferenceIndex>, workspace: &WeakEntity<Workspace>) 
     let mut item = SidebarTreeItem::new("Tags");
 
     if !tree.is_empty() {
-        item = item.children(tree.iter().map(|node| tree_item(node, None, workspace)));
+        item = item.children(
+            tree.iter()
+                .map(|node| tree_item(node, None, workspace, None)),
+        );
     }
 
     item

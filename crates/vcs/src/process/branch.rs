@@ -1,0 +1,58 @@
+use std::path::Path;
+
+use domain::BranchName;
+
+use super::runner::{GitProcessError, GitRunner};
+
+#[derive(Debug, thiserror::Error)]
+pub enum BranchError {
+    #[error("cannot leave the current branch for {target}: {stderr}")]
+    SwitchRefused { target: String, stderr: String },
+    #[error("git exited with status {status}: {stderr}")]
+    Failed { status: i32, stderr: String },
+    #[error("could not run git: {0}")]
+    Unavailable(String),
+}
+
+impl GitRunner {
+    pub fn delete_local_branch(
+        &self,
+        repository: &Path,
+        branch: &BranchName,
+        switch_to: Option<&BranchName>,
+    ) -> Result<(), BranchError> {
+        if let Some(target) = switch_to {
+            self.run(repository, &["checkout", target.as_str()])
+                .map_err(|error| match error {
+                    GitProcessError::Spawn(source) => BranchError::Unavailable(source.to_string()),
+                    GitProcessError::Failed { stderr, .. } => BranchError::SwitchRefused {
+                        target: target.to_string(),
+                        stderr: summarise(&stderr),
+                    },
+                })?;
+        }
+
+        self.run(repository, &["branch", "-D", branch.as_str()])
+            .map(|_| ())
+            .map_err(classify)
+    }
+}
+
+fn classify(error: GitProcessError) -> BranchError {
+    match error {
+        GitProcessError::Spawn(source) => BranchError::Unavailable(source.to_string()),
+        GitProcessError::Failed { status, stderr } => BranchError::Failed {
+            status,
+            stderr: summarise(&stderr),
+        },
+    }
+}
+
+fn summarise(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("git reported no reason")
+        .to_string()
+}

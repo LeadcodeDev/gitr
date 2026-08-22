@@ -7,10 +7,10 @@
 
 use std::sync::Arc;
 
-use domain::{BranchName, HistoryScope, ObjectId, Reference};
+use domain::{HistoryScope, ObjectId, Reference};
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement as _, Render, Styled as _, Subscription, Window, div, px,
+    ParentElement as _, Render, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
@@ -22,8 +22,10 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::branch_actions::Deletion;
 use crate::density;
 use crate::repository::model::{History, HistoryFilter, LoadState};
+use crate::workspace::Workspace;
 
 use super::delegate::HistoryTableDelegate;
 
@@ -108,12 +110,20 @@ impl HistoryPanel {
 
     pub fn set_head(
         &mut self,
-        branch: Option<BranchName>,
+        deletion: Deletion,
         commit: Option<ObjectId>,
         cx: &mut Context<Self>,
     ) {
         self.table.update(cx, |table, cx| {
-            table.delegate_mut().set_head(branch, commit);
+            table.delegate_mut().set_head(deletion, commit);
+            table.refresh(cx);
+        });
+        cx.notify();
+    }
+
+    pub fn set_workspace(&mut self, workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
+            table.delegate_mut().set_workspace(workspace);
             table.refresh(cx);
         });
         cx.notify();

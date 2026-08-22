@@ -50,6 +50,8 @@ pub const SIDEBAR_INDENT: Pixels = px(10.);
 /// `Theme::sync_system_appearance` — never overwrites these fields back to its own
 /// defaults. Reapplying here is therefore redundant given today's bundled themes, not
 /// load-bearing; it stays cheap insurance against a future theme file that does set them.
+pub const MENU_ICON_SIZE: Pixels = px(16.);
+
 pub fn apply(cx: &mut App) {
     let theme = Theme::global_mut(cx);
     theme.font_size = FONT_SIZE;

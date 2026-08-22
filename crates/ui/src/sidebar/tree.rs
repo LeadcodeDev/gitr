@@ -12,7 +12,7 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement as _, IntoElement,
+    AnyElement, App, ClickEvent, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div, percentage, prelude::FluentBuilder as _, px,
 };
@@ -20,6 +20,7 @@ use gpui_component::{
     ActiveTheme as _, Collapsible, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    menu::{ContextMenuExt as _, PopupMenu},
     sidebar::SidebarItem,
     v_flex,
 };
@@ -43,6 +44,7 @@ const ROW_PADDING_X: Pixels = px(6.);
 const DISCLOSURE_SIZE: Pixels = px(15.);
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+type MenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
 
 /// One row of the sidebar's section and reference tree.
 ///
@@ -57,6 +59,7 @@ pub struct SidebarTreeItem {
     active: bool,
     default_open: bool,
     on_click: Option<ClickHandler>,
+    context_menu: Option<MenuBuilder>,
     children: Vec<SidebarTreeItem>,
     sidebar_collapsed: bool,
 }
@@ -69,6 +72,7 @@ impl SidebarTreeItem {
             active: false,
             default_open: false,
             on_click: None,
+            context_menu: None,
             children: Vec::new(),
             sidebar_collapsed: false,
         }
@@ -97,6 +101,14 @@ impl SidebarTreeItem {
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_click = Some(Rc::new(handler));
+        self
+    }
+
+    pub fn context_menu(
+        mut self,
+        builder: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+    ) -> Self {
+        self.context_menu = Some(Rc::new(builder));
         self
     }
 
@@ -177,7 +189,7 @@ fn render_row(
     open_state: Option<Entity<bool>>,
     is_open: bool,
     cx: &mut App,
-) -> impl IntoElement {
+) -> AnyElement {
     let indent = density::SIDEBAR_INDENT * (depth as f32);
     let is_top_level = depth == 0;
 
@@ -206,7 +218,7 @@ fn render_row(
 
     let handler = item.on_click.clone();
 
-    h_flex()
+    let row = h_flex()
         .id("row")
         .w_full()
         .h(density::SIDEBAR_ROW_HEIGHT)
@@ -240,7 +252,14 @@ fn render_row(
         )
         .when_some(handler, |this, handler| {
             this.on_click(move |ev, window, cx| handler(ev, window, cx))
-        })
+        });
+
+    match item.context_menu.clone() {
+        Some(menu) => row
+            .context_menu(move |this, window, cx| menu(this, window, cx))
+            .into_any_element(),
+        None => row.into_any_element(),
+    }
 }
 
 /// The icon-only presentation used for depth-0 items when the sidebar itself is

@@ -40,12 +40,13 @@ use std::time::{Duration, SystemTime};
 use domain::{Aspect, BranchName, HeadState, HistoryScope, ObjectId, Reference, RepositoryChange};
 use gpui::{
     Action, Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, Axis, Context,
-    Entity, Hsla, InteractiveElement as _, IntoElement, Menu, MenuItem, OsAction,
-    ParentElement as _, PathPromptOptions, Render, ScrollHandle, Styled as _, Subscription, Task,
-    WeakEntity, Window, div, ease_in_out, px,
+    Entity, Focusable as _, Hsla, InteractiveElement as _, IntoElement, Menu, MenuItem,
+    MouseButton, OsAction, ParentElement as _, PathPromptOptions, Render, ScrollHandle,
+    SharedString, Styled as _, Subscription, Task, WeakEntity, Window, div, ease_in_out,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IconName, Root, Sizable as _, Theme, ThemeMode, TitleBar, WindowExt as _,
+    ActiveTheme as _, Icon, IconName, Root, Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dock::{DockArea, DockAreaState, DockEvent, DockItem, Panel, StackPanel, TabPanel},
     h_flex,
@@ -56,11 +57,13 @@ use gpui_component::{
 };
 use vcs::process::{CloneProgress, GitRunner};
 
+use crate::density::MENU_ICON_SIZE;
 use crate::{
     actions::{
         About, MinimizeWindow, OpenFromDisk, Quit, SynchroniseActiveProject, ToggleDetailPanel,
         ToggleSidebar, UseDarkTheme, UseLightTheme, UseSystemTheme, ZoomWindow,
     },
+    branch_actions::Deletion,
     detail::DetailPanel,
     history::{HistoryPanel, HistoryPanelEvent},
     persistence,
@@ -68,7 +71,9 @@ use crate::{
         Project, ProjectList, ProjectSource, RemoteProject, display_name, remote_cache_dir,
         resolve_repository_root, validate_remote_url,
     },
-    repository::{History, HistoryFilter, LoadState, RepositoryEvent, RepositoryState},
+    repository::{
+        History, HistoryFilter, LoadState, ReferenceIndex, RepositoryEvent, RepositoryState,
+    },
     sidebar::{self, selector::CloningStatus},
     theme_preference::ThemePreference,
 };
@@ -288,6 +293,8 @@ impl Workspace {
         let (history_panel, detail_panel, detail_slot) =
             restored.unwrap_or_else(|| install_default_layout(&dock_area, window, cx));
 
+        let this = cx.entity().downgrade();
+        history_panel.update(cx, |panel, cx| panel.set_workspace(this, cx));
         sync_panels_from_repository(&repository, &history_panel, &detail_panel, cx);
 
         let repository_subscription =
@@ -315,7 +322,7 @@ impl Workspace {
         })
         .detach();
 
-        let workspace = Self {
+        let mut workspace = Self {
             dock_area,
             projects,
             repository,
@@ -342,6 +349,9 @@ impl Workspace {
             _project_search_subscription: project_search_subscription,
             _project_url_subscription: project_url_subscription,
         };
+        if workspace.repository.read(cx).selected().is_none() {
+            workspace.hide_detail(window, cx);
+        }
         workspace.refresh_application_menus(cx);
         workspace
     }
@@ -563,6 +573,70 @@ impl Workspace {
             .update(cx, |repository, cx| repository.set_filter(filter, cx));
     }
 
+    pub(crate) fn delete_local_branch(
+        &mut self,
+        branch: BranchName,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let repository_path = self.repository.read(cx).path().to_path_buf();
+        let switch_to = self
+            .head_branch_name(cx)
+            .filter(|head| head == &branch)
+            .and_then(|_| self.fallback_branch(cx));
+
+        cx.spawn_in(window, async move |workspace, window| {
+            let deleted = branch.clone();
+            let result = window
+                .background_executor()
+                .spawn(async move {
+                    GitRunner::new().delete_local_branch(
+                        &repository_path,
+                        &branch,
+                        switch_to.as_ref(),
+                    )
+                })
+                .await;
+
+            let _ = workspace.update_in(window, move |workspace, window, cx| {
+                match result {
+                    Ok(()) => {
+                        window.push_notification(
+                            (NotificationType::Info, format!("Deleted {deleted}")),
+                            cx,
+                        );
+                        workspace.repository.update(cx, |repository, cx| {
+                            repository.reload(RepositoryChange::only(Aspect::References), cx);
+                        });
+                    }
+                    Err(error) => {
+                        window.push_notification(
+                            (
+                                NotificationType::Error,
+                                format!("Could not delete {deleted}: {error}"),
+                            ),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn head_branch_name(&self, cx: &App) -> Option<BranchName> {
+        self.repository.read(cx).head().ready()?.branch().cloned()
+    }
+
+    fn fallback_branch(&self, cx: &App) -> Option<BranchName> {
+        self.repository
+            .read(cx)
+            .references()
+            .ready()?
+            .fallback_branch()
+    }
+
     fn on_repository_event(
         &mut self,
         repository: &Entity<RepositoryState>,
@@ -574,9 +648,10 @@ impl Workspace {
             RepositoryEvent::HistoryChanged => {
                 let history = repository.read(cx).history().clone();
                 let head = repository.read(cx).head().clone();
+                let deletion = deletion_context(repository, cx);
                 self.history_panel.update(cx, |panel, cx| {
                     panel.set_history(history, cx);
-                    panel.set_head(head_branch(&head), head_commit(&head), cx);
+                    panel.set_head(deletion, head_commit(&head), cx);
                 });
                 cx.notify();
             }
@@ -584,6 +659,9 @@ impl Workspace {
                 let detail = repository.read(cx).detail().clone();
                 self.detail_panel
                     .update(cx, |panel, cx| panel.set_detail(detail, cx));
+                if repository.read(cx).selected().is_none() {
+                    self.dismiss_detail(window, cx);
+                }
             }
             RepositoryEvent::Failed(message) => {
                 window.push_notification((NotificationType::Error, message.to_string()), cx);
@@ -602,6 +680,7 @@ impl Workspace {
             HistoryPanelEvent::Selected(id) => {
                 self.repository
                     .update(cx, |repository, cx| repository.select(Some(*id), cx));
+                self.reveal_detail(window, cx);
             }
             HistoryPanelEvent::DoubleClicked(id) => {
                 self.repository
@@ -645,6 +724,7 @@ impl Workspace {
         });
 
         self.detail_slot = Some(detail_tab_panel);
+        self.history_panel.focus_handle(cx).focus(window, cx);
     }
 
     /// Detaches the detail panel from the centre split, giving its width back to the
@@ -666,6 +746,14 @@ impl Workspace {
         content_split.update(cx, |split, cx| {
             split.remove_panel(Arc::new(slot), window, cx);
         });
+    }
+
+    fn dismiss_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.detail_slot.is_none() {
+            return;
+        }
+        self.hide_detail(window, cx);
+        cx.notify();
     }
 
     fn toggle_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1200,11 +1288,23 @@ fn sync_panels_from_repository(
     let history = repository.read(cx).history().clone();
     let detail = repository.read(cx).detail().clone();
     let head = repository.read(cx).head().clone();
+    let deletion = deletion_context(repository, cx);
     history_panel.update(cx, |panel, cx| {
         panel.set_history(history, cx);
-        panel.set_head(head_branch(&head), head_commit(&head), cx);
+        panel.set_head(deletion, head_commit(&head), cx);
     });
     detail_panel.update(cx, |panel, cx| panel.set_detail(detail, cx));
+}
+
+fn deletion_context(repository: &Entity<RepositoryState>, cx: &App) -> Deletion {
+    let state = repository.read(cx);
+    Deletion {
+        head: head_branch(state.head()),
+        fallback: state
+            .references()
+            .ready()
+            .and_then(ReferenceIndex::fallback_branch),
+    }
 }
 
 fn head_branch(head: &LoadState<HeadState>) -> Option<BranchName> {
@@ -1398,7 +1498,6 @@ fn title_bar(
                 .child(
                     Button::new("toggle-sidebar")
                         .ghost()
-                        .small()
                         .icon(if sidebar_collapsed {
                             IconName::PanelLeftOpen
                         } else {
@@ -1419,7 +1518,6 @@ fn title_bar(
                 .child(
                     Button::new("toggle-detail")
                         .ghost()
-                        .small()
                         .icon(if detail_visible {
                             IconName::PanelRightClose
                         } else {
@@ -1456,7 +1554,6 @@ fn theme_preference_control(
 
     Button::new("theme-preference")
         .ghost()
-        .small()
         .icon(preference.icon())
         .tooltip(format!("Theme: {}", preference.label()))
         .dropdown_menu(move |menu, _, _| {
@@ -1472,17 +1569,28 @@ fn theme_preference_menu_item(
     current: ThemePreference,
 ) -> PopupMenuItem {
     let workspace = workspace.clone();
-    PopupMenuItem::new(option.label())
-        .icon(option.icon())
-        .checked(option == current)
-        .on_click(move |_, window, cx| {
-            let Some(workspace) = workspace.upgrade() else {
-                return;
-            };
-            workspace.update(cx, |workspace, cx| {
-                workspace.set_theme_preference(option, window, cx);
-            });
-        })
+    let label: SharedString = option.label().into();
+    let is_current = option == current;
+
+    PopupMenuItem::element(move |_, _| {
+        h_flex()
+            .flex_1()
+            .items_center()
+            .gap_2()
+            .child(Icon::new(option.icon()).size(MENU_ICON_SIZE))
+            .child(div().flex_1().child(label.clone()))
+            .when(is_current, |this| {
+                this.child(Icon::new(IconName::Check).size(MENU_ICON_SIZE))
+            })
+    })
+    .on_click(move |_, window, cx| {
+        let Some(workspace) = workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_theme_preference(option, window, cx);
+        });
+    })
 }
 
 /// The whole native macOS menu bar, rebuilt from scratch on every call — see
@@ -1644,6 +1752,12 @@ impl Render for Workspace {
                     .min_h_0()
                     .flex()
                     .flex_row()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|workspace, _, window, cx| {
+                            workspace.dismiss_detail(window, cx);
+                        }),
+                    )
                     .child(sidebar::render(
                         &references,
                         &head,
@@ -1652,9 +1766,24 @@ impl Render for Workspace {
                         sidebar_collapsed,
                         cx,
                     ))
-                    .child(div().flex_1().min_w_0().child(dock_area)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(dock_area),
+                    ),
             )
-            .child(status_bar(&history))
+            .child(
+                div()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|workspace, _, window, cx| {
+                            workspace.dismiss_detail(window, cx);
+                        }),
+                    )
+                    .child(status_bar(&history)),
+            )
             .children(self.theme_transition.as_ref().map(theme_transition_overlay))
             .children(sheet_layer)
             .children(dialog_layer)
